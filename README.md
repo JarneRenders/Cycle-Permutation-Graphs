@@ -51,6 +51,8 @@ Mandatory arguments to long options are mandatory for short options too.
     -h, --help             print help message
     -g, --girth=#          only generate cycle permutation graphs of girth at
                             least #
+    -p, --permutations     use a different generation method; this method WILL
+                            print out isomorphic copies, but is faster
     -n, --non-hamiltonian  only generate non-hamiltonian cycle permutation
                             graphs
     -v, --verbose          print out extra statistics
@@ -72,6 +74,9 @@ Generate all cycle permutation graphs of order 10 and girth at least 8 and send 
 
 `./genPermutationGraphs -n -g7 18`
 Generate all non-hamiltonian cycle permutation graphs of order 18 and girth at least 7 and send them to stdout.
+
+`./genPermutationGraphs -pn 18`
+Generate all non-hamiltonian cycle permutation graphs of order 18 and send them to stdout. This is slightly faster than without -p, but graphs which are isomorphic will most likely be output.
 
 ## isPermutationGraph
 ### Short manual

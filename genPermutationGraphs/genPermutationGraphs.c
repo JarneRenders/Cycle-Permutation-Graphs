@@ -28,6 +28,8 @@ careful not to put an argument immediately after one with an option. E.g.\n\
 \n\
 Mandatory arguments to long options are mandatory for short options too.\n\
     -h, --help             print help message\n\
+    -p, --permutations     use a different generation method; this method WILL\n\
+                            print out isomorphic copies, but is faster\n\
     -g, --girth=#          only generate cycle permutation graphs of girth at\n\
                             least #\n\
     -n, --non-hamiltonian  only generate non-hamiltonian cycle permutation\n\
@@ -196,6 +198,7 @@ struct options {
     bool haveModResPair;
     bool nonHamFlag;
     bool verboseFlag;
+    bool permutationMethodFlag;
 };
 
 // Many counters for keeping statistics.
@@ -250,6 +253,8 @@ struct counters {
     long long unsigned int addNewCyclesAndMoreThanOneDeg2Nbr;
     long long unsigned int didNotComputeGenerators;
     long long unsigned int notRepresentative;
+    long long unsigned int expensiveHam;
+    long long unsigned int expensiveHamSpokes[BITSETSIZE];
 };
 
 // Global variables needed for storing the generators of the automorphism group
@@ -828,7 +833,7 @@ typedef struct
     vertvec din,dout,farend;
 } nodedata;
 
-static vertvec onstack,stack;       /* stack contains vertex numbers */
+static vertvec stack;       /* stack contains vertex numbers */
 static int *stackptr,stacklev;      /* stackptr points above top */
 static int classstack[4*MAXNE];      /* stack of classifications */
    /* x >= 0        : edge number
@@ -852,7 +857,7 @@ classout(nodedata *nodat, int v, int w, int en)
 
 static int
 classin(nautygraph *g, nodedata *nodat,
-                                int v, int w, int en, int *nin, int nv)
+                                int v, int w, int en, int *nin, int nv, vertvec onstack)
 /* classify edge en = vw in */
 {
     nodedata *np;
@@ -891,7 +896,7 @@ classin(nautygraph *g, nodedata *nodat,
         PUSH(fv); // Put vertex fv on vertex number stack
         PUSH(fw);
         if (*nin == nv - 1)
-            return classin(g,np,fv,fw,i,nin,nv);
+            return classin(g,np,fv,fw,i,nin,nv,onstack);
         else
             return classout(np,fv,fw,i);
     }
@@ -899,8 +904,24 @@ classin(nautygraph *g, nodedata *nodat,
     return DUNNO;
 }
 
+// long long unsigned int freq[BITSETSIZE] = {0};
+
+// Only speedup in 64 bit case
+#ifdef USE_64_BIT
+    #define unsafeFirst(set) __builtin_ctzll((set))
+    #define safeFirst(set) isEmpty(set) ? -1 : unsafeFirst(set)
+    // Set will be changed after calling the forEach
+    #define forEachFast(element, set) for (int element = unsafeFirst(set);\
+     (set) = ((set) & ((set) - 1)), (element) != -1; (element) = safeFirst(set))
+#else
+    #define unsafeFirst(set) unsafeNext(set, -1)
+    #define safeFirst(set) next(set, -1)
+    #define forEachFast(element, set) forEach(element, set)
+#endif
+
+
 static int
-propagate(nautygraph *g, nodedata *ndptr, int *nin, int nv)
+propagate(nautygraph *g, nodedata *ndptr, int *nin, int nv, vertvec onstack)
 /* propagate classifications: */
 /*   ans = YES, NO or DUNNO */
 {
@@ -914,7 +935,7 @@ propagate(nautygraph *g, nodedata *ndptr, int *nin, int nv)
     din = np->din;
     dout = np->dout;
 
-   int (*edgeToIndex)[BITSETSIZE] = g->eL->edgeToIndex;
+    int (*edgeToIndex)[BITSETSIZE] = g->eL->edgeToIndex;
 
     w = -1;
 
@@ -923,7 +944,6 @@ propagate(nautygraph *g, nodedata *ndptr, int *nin, int nv)
     while (status == DUNNO && stackptr > stack) 
     {
         POP(v); // Get top of vertex stack
-        bitset vNbrs = g->bitsetList[v];
 
         // If v has no NO edges 
         if (dout[v] == 0)
@@ -931,9 +951,11 @@ propagate(nautygraph *g, nodedata *ndptr, int *nin, int nv)
             if (din[v] == 2) // but v has 2 YES edges.
             {
                 // Find the DUNNO edge and make it NO
-                forEach(el, vNbrs) {
+                bitset vNbrs = g->bitsetList[v];
+                forEachFast(el, vNbrs) {
                     if(class[edgeToIndex[v][el]] == DUNNO) {
                         w = el;
+                        break;
                     }
                 }
                 int en = edgeToIndex[v][w];
@@ -948,11 +970,11 @@ propagate(nautygraph *g, nodedata *ndptr, int *nin, int nv)
         else if (dout[v] == 1) // If v has 1 NO edge:
         {
             // Find the DUNNO edges and make them YES
-            forEach(w, vNbrs) {
+            bitset vNbrs = g->bitsetList[v];
+            forEachFast(w, vNbrs) {
                 int en = edgeToIndex[v][w];
-                if (class[en] == DUNNO)
-                {
-                    if ((status = classin(g,np,v,w,en,nin,nv)) != DUNNO)
+                if (class[en] == DUNNO) {
+                    if ((status = classin(g,np,v,w,en,nin,nv,onstack)) != DUNNO)
                         break;
                     else
                         PUSH(w); // edge of w has changed and status is DUNNO
@@ -975,7 +997,7 @@ propagate(nautygraph *g, nodedata *ndptr, int *nin, int nv)
 }
 
 static int
-hamnode(nautygraph *g, nodedata *nodat, int level, int nin, int nv)
+hamnode(nautygraph *g, nodedata *nodat, int level, int nin, int nv, vertvec onstack)
 /* main node for recursion */
 {
 
@@ -984,7 +1006,7 @@ hamnode(nautygraph *g, nodedata *nodat, int level, int nin, int nv)
     int v,en;
     int *csptr;
 
-    status = propagate(g,nodat,&nin,nv);
+    status = propagate(g,nodat,&nin,nv,onstack);
 
     if (status != DUNNO) {
 
@@ -1002,7 +1024,8 @@ hamnode(nautygraph *g, nodedata *nodat, int level, int nin, int nv)
     struct edgeLabelling *eL = g->eL;
 
     // Check the neighbours of v.
-    forEach(w, g->bitsetList[v]) {
+    bitset vNbrs = g->bitsetList[v];
+    forEachFast(w, vNbrs) {
         en = eL->edgeToIndex[v][w]; 
 
         // v will have one YES edge and two DUNNO.
@@ -1017,7 +1040,7 @@ hamnode(nautygraph *g, nodedata *nodat, int level, int nin, int nv)
             PUSH(w);
 
             // Recurse with vw as NO
-            status = hamnode(g,nodat,level+1,nin,nv);
+            status = hamnode(g,nodat,level+1,nin,nv,onstack);
             if (status == YES) break;
 
             // Reset the stack to before
@@ -1050,96 +1073,75 @@ hamnode(nautygraph *g, nodedata *nodat, int level, int nin, int nv)
 
     if (status == DUNNO)
         fprintf(stderr,"hamnode returning DUNNO, this can't happen\n");
+
     return status;
 }
 
+// Makes this method 64 bit specific
+static int farendTemplate[64] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,
+    19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,
+    44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63};
+
+// Highly optimized for this specific algorithm version of cubhamg
 static int
-cubham(nautygraph *gn, edgevec initclass, int setEdges[], int nSetEdges)
+cubham(nautygraph *gn, edgevec initclass, int setEdges[], int nSetEdges, int en, int v, int w)
 /* external interface */
 {
-    int i,status,nin,v,w;
-    // int ne = gn->nde/2;
+    int status,nin;
     int nv = gn->nv;
 
     // Puts all entries of hcnodat.class to DUNNO.
     // and all entries of din, dout to 0;
     nodedata hcnodat = {0};
+    vertvec onstack = {0};
 
-    // For every vertex put 0 YES and 0 NO edges
-    // Point farend to itself
-    // None are onstack.
-    for (i = nv; --i >= 0;)
-    {
-        hcnodat.farend[i] = i; // expensive
-        onstack[i] = 0;
-    }
+    memcpy(hcnodat.farend, farendTemplate, nv*sizeof(int));
 
     nin = 0;
     stacklev = 0;
     RESETSTACK;
 
-    forEach(el, gn->degree2) {
+    bitset deg2 = gn->degree2;
+    forEach(el, deg2) {
         hcnodat.dout[el] = 1;
         PUSH(el);
     }
 
-
-
     status = DUNNO;
     classstackptr = classstack;
 
-
-    int *indexToEdge = gn->eL->indexToEdge;
-
-    if (initclass) {
-        for (i = 0; i < nSetEdges; ++i) { 
-            int en = setEdges[i];
-            v = indexToEdge[2*en];
-            w = indexToEdge[2*en+1];
-
-            // We initialiseren edge en (vw) op NO
-            if (initclass[en] == NO)
-            {
-                // als dit al YES was probleem
-                if (hcnodat.class[en] == YES) {
-                    status = NO;
-                }
-                else if (hcnodat.class[en] == DUNNO) 
-                {
-                    // Als v nog geen NO edges heeft maak vw NO
-                    if (hcnodat.dout[v] == 0) 
-                    {
-                        status = classout(&hcnodat,v,w,en);
-                        PUSH(v);
-                        PUSH(w);
-                    }
-                    else // v mag maar één incident NO hebben.
-                        status = NO;
-                }
-            }
-            else if (initclass[en] == YES)
-            {
-                if (hcnodat.class[en] == NO)
-                    status = NO;
-                else if (hcnodat.class[en] == DUNNO)
-                {
-                    if (hcnodat.din[v] < 2)
-                    {
-                        status = classin(gn,&hcnodat,v,w,en,&nin,nv);
-                        PUSH(v);
-                        PUSH(w);
-                    }
-                    else
-                        status = NO;
-                }
-            }
-
-            if (status != DUNNO) break;
-        }
-    }
+    // We require presence of vw in hamiltonian cycle.
+    // Initializing other edges to YES or NO has no effect or makes it slower.
+    status = classin(gn,&hcnodat,v,w,en,&nin,nv,onstack);
+    PUSH(v);
+    PUSH(w);
 
     if (status == DUNNO)
-        status = hamnode(gn,&hcnodat,0,nin,nv);
+        status = hamnode(gn,&hcnodat,0,nin,nv,onstack);
+
+    // if(status == YES) {
+    //     freq[0]++;
+    //     int crossings = 0;
+    //     for(int i = 0; i < nv/2; i++) {
+    //         forEachAfterIndex(j, gn->bitsetList[i], nv/2-1) {
+    //             int en = gn->eL->edgeToIndex[i][j];
+    //             if(hcnodat.class[en] == YES) crossings++;
+    //         }
+    //     }
+    //     ++freq[crossings];
+    //     if((crossings == 4 || crossings == 6) ) {
+    //      // && gn->nde != 3*nv) {
+    //         for(int i = 0; i < nv; i++) {
+    //             fprintf(stderr, "%d: ", i);
+    //             forEach(j, gn->bitsetList[i]) {
+    //                 fprintf(stderr, "%d (%d)", j, hcnodat.class[gn->eL->edgeToIndex[i][j]]);
+    //             }
+    //             fprintf(stderr, "\n");
+    //         }
+    //         // writeToG6(gn);
+    //         // fprintf(stderr, "Should not\n");
+    //     }
+    // }
 
     return status;
 }
@@ -1147,7 +1149,8 @@ cubham(nautygraph *gn, edgevec initclass, int setEdges[], int nSetEdges)
 // Let P be a path such that the degree 3 vertices of one of the cycles of a
 // consecutive permutation 2-factor induce P. We assume that u is the endpoint
 // of such a path.
-bool addingEdgeGivesHamiltonianCycleCubHam(nautygraph *g, int u, int v) {
+bool addingEdgeGivesHamiltonianCycleCubHam(nautygraph *g,
+ struct counters *counters, int u, int v) {
 
     bitset remainingVertices = setComplement(singleton(u), g->nv);
     removeElement(remainingVertices, v);
@@ -1159,6 +1162,9 @@ bool addingEdgeGivesHamiltonianCycleCubHam(nautygraph *g, int u, int v) {
         return false;
     }
 
+    counters->expensiveHam++;
+    counters->expensiveHamSpokes[g->nde/2 - g->nv]++;
+
     edgevec initclass = {0};
     int setEdges[g->nde];
     int nSetEdges = 0;
@@ -1167,20 +1173,11 @@ bool addingEdgeGivesHamiltonianCycleCubHam(nautygraph *g, int u, int v) {
     initclass[en] = YES;
     setEdges[nSetEdges++] = en; 
 
-    // Setting edges to NO here does not yield any speedup.
+    // Setting edges to YES/NO here does not yield any speedup.
 
-    // Setting edges incident with degree 2 to YES does not hurt.
-    forEach(w, g->degree2) {
-        forEach(nbr, g->bitsetList[w]) {
-            en = g->eL->edgeToIndex[w][nbr];
-            if(initclass[en] == DUNNO) {
-                initclass[en] = YES;
-                setEdges[nSetEdges++] = en;
-            }
-        }
-    }
-
-    int status = cubham(g, initclass, setEdges, nSetEdges);
+    int status = cubham(g, initclass, setEdges, nSetEdges, en, u, v);
+    if(status == YES)
+        counters->calledNautyEdgeCanonicalTotal++;
     return status == YES;
 
 }
@@ -2421,7 +2418,7 @@ void recursionCCPM(nautygraph *g, struct options *options,
             if(options->nonHamFlag) {
                 counters->checkHam++;
                 counters->checkHamSpokes[g->nde/2-g->nv]++;
-                if(addingEdgeGivesHamiltonianCycleCubHam(g, u, v)) {
+                if(addingEdgeGivesHamiltonianCycleCubHam(g, counters, u, v)) {
 
                     counters->pruneHam++;
                     counters->pruneHamSpokes[g->nde/2-g->nv]++;
@@ -2447,6 +2444,568 @@ void recursionCCPM(nautygraph *g, struct options *options,
         // 7. Perform reduction X^-1
         removeSpoke(g, u, v);
         RESETGRAPHSTATE;
+    }
+}
+
+bool mirroringIsGreater(int list[], int list2[], int spokes, int n){
+    for(int i = 1; i <= spokes; i++) {
+        int normal = list[i];
+        int mirrored = n/2 - list2[i];
+        if(normal > mirrored) {
+            // fprintf(stderr, "Mirror\n");
+            return false; 
+        }
+        if(normal < mirrored) break;
+    }
+    return true;
+}
+
+bool reversingIsGreater(int list[], int list2[], int spokes, int n) {
+    for(int i = 0; i <= spokes; i++) {
+        int normal = list[i];
+        int reversed = (n/2 - list2[spokes] + list2[spokes - i]) % (n/2);
+        if(normal > reversed) {
+            // fprintf(stderr, "Reverse\n");
+            return false;
+        }
+        if(normal < reversed) break;
+    }
+    return true;
+}
+
+// Compares the cyclic lists list1 and list2 starting at idx1 and idx2 resp. We
+// compare the lexicographically cumulative lists.
+int compareLists(int list1[], int idx1, int list2[], int idx2, int len, int n) {
+    int sum1 = 0;
+    int sum2 = 0;
+    for(int i = 0; i < len; i++) {
+        sum1 = (sum1 + list1[(idx1+i)%len])%(n/2);
+        sum2 = (sum2 + list2[(idx2+i)%len])%(n/2);
+        if(sum1 < sum2) return -1;
+        if(sum1 > sum2) return 1;
+    }
+    return 0;
+}
+
+// Let L be a list with L[0] = 0 and distinct elements between 0 and n/2. Let
+// distList contain at index i value (L[i+1] - L[i])%n/2. This method returns
+// the index k such that if we cyclically rotate L such that k is at position 0
+// and subtract L[k] modulo n/2 we get the lexicographically smallest list.
+int leastRotation(int distList[], int length, int n) {
+    int smallest = 0;
+    for(int i = 1; i < length; i++) {
+        if(compareLists(distList, i, distList, smallest, length, n) == -1) {
+            smallest = i;
+        }
+    }
+    return smallest;
+}
+
+bool distListIsLexMinimalRot(int list[], int n) {
+    // int correctList[] = {0,2,4,6,8,5,7,1,3};
+    // int isCorrect = (compareLists(list, 0, correctList, 0, 6, n) == 0);
+    // if(isCorrect) {
+    //     fprintf(stderr, "Correct\n");
+    // }
+
+    int distList[n/2];
+    int reverseList[n/2];
+    for(int i = 0; i < n/2-1; i++) {
+        distList[i] = (n/2 + list[i+1] - list[i]) % (n/2);
+        reverseList[n/2-1-i] = distList[i];
+    }
+    distList[n/2-1] = (n/2 + list[0] - list[n/2-1]) % (n/2);
+    reverseList[0] = distList[n/2-1];
+
+    // if(isCorrect) {
+    //     fprintf(stderr, "distList: ");
+    //     for(int i = 0; i < n/2; i++) {
+    //         fprintf(stderr, "%d ", distList[i]);
+    //     }
+    //     fprintf(stderr, "\n");
+    //             fprintf(stderr, "revList: ");
+    //     for(int i = 0; i < n/2; i++) {
+    //         fprintf(stderr, "%d ", reverseList[i]);
+    //     }
+    //     fprintf(stderr, "\n");
+    //     fprintf(stderr, "%d\n",leastRotation(distList, n/2, n));
+    // }
+
+    if(compareLists(distList, 0, distList, leastRotation(distList, n/2, n),
+     n/2, n) == 1) {
+        // if(isCorrect) {
+        //     // fprintf(stderr, "Normal rotation\n");
+        // }
+        return false;
+    }
+    if(compareLists(distList, 0, reverseList,
+     leastRotation(reverseList, n/2, n), n/2, n) == 1) {
+        // if(isCorrect) fprintf(stderr, "Reverse\n");
+        return false;
+    }
+
+    int revReverseList[n/2];
+    for(int i = 0; i < n/2-1; i++) {
+        reverseList[n/2 - 1 - i] = (n/2 - list[i+1] + list[i]) % (n/2);
+        revReverseList[i] = reverseList[n/2 - 1 -i]; 
+    }
+    reverseList[0] = (n/2 - list[0] + list[n/2-1]) % (n/2);
+    revReverseList[n/2-1] = reverseList[0];
+        // fprintf(stderr, "revList: ");
+        // for(int i = 0; i < n/2; i++) {
+        //     fprintf(stderr, "%d ", reverseList[i]);
+        // }
+        // fprintf(stderr, "\n");
+
+    // if(!compareSuffixes(distList, reverseList, n/2)) return false;
+    if(compareLists(distList, 0, reverseList,
+     leastRotation(reverseList, n/2, n), n/2, n) == 1)
+    {
+        // if(isCorrect) fprintf(stderr, "Reverse+Compl\n");
+        return false;
+    }
+    if(compareLists(distList, 0, revReverseList,
+     leastRotation(revReverseList, n/2, n), n/2, n) == 1) {
+        // if(isCorrect) fprintf(stderr, "Reverse+Compl\n");
+        return false;
+    }
+
+    int swappedList[n/2];
+    for(int i = 0; i < n/2; i++) {
+        swappedList[list[i]] = i;
+    }
+    int distListSwapped[n/2];
+    for(int i = 0; i < n/2-1; i++) {
+        distListSwapped[i] = (n/2 + swappedList[i+1] - swappedList[i]) % (n/2);
+        reverseList[n/2-1-i] = distListSwapped[i];
+    }
+    distListSwapped[n/2-1] = (n/2 + swappedList[0] - swappedList[n/2-1]) % (n/2);
+    reverseList[0] = distListSwapped[n/2-1];
+    if(compareLists(distList, 0, distListSwapped,
+     leastRotation(distListSwapped, n/2, n), n/2, n) == 1)
+    {
+        // if(isCorrect) {
+        //     for(int i = 0; i < n/2; i++) {
+        //         fprintf(stderr, "%d ", swappedList[i]);
+        //     }
+        //     fprintf(stderr, "\n %d, ", leastRotation(distListSwapped, n/2));
+        //     fprintf(stderr, "Swapped\n");
+        // }
+        return false;
+    }
+    if(compareLists(distList, 0, reverseList,
+     leastRotation(reverseList, n/2, n), n/2, n) == 1) {
+        // if(isCorrect) fprintf(stderr, "Swapped+rev\n");
+        return false;
+    }
+
+
+    for(int i = 0; i < n/2-1; i++) {
+        reverseList[n/2 - 1 - i] = (n/2 - swappedList[i+1] + swappedList[i]) % (n/2);
+        revReverseList[i] = reverseList[n/2 - 1 -i]; 
+    }
+    reverseList[0] = (n/2 - swappedList[0] + swappedList[n/2-1]) % (n/2);
+    revReverseList[n/2-1] = reverseList[0];
+
+    if(compareLists(distList, 0, reverseList, leastRotation(reverseList, n/2, n),
+     n/2, n) == 1) {
+        // if(isCorrect) fprintf(stderr, "Swapped + rev + compl\n");
+        return false;
+    }
+    if(compareLists(distList, 0, revReverseList,
+     leastRotation(revReverseList, n/2, n), n/2, n) == 1) {
+        // if(isCorrect) fprintf(stderr, "Swapped+Reverse+Compl\n");
+        return false;
+    }
+
+    return true;   
+}
+
+void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remainingOptions, bitset forbiddenNextSteps[], int n) {
+    int fj1 = list[spokes - 1];
+    int fj2 = list[spokes];
+
+    int k = n/2;
+    int inc[] = {(fj1+1)%k, (fj2+1)%k};
+    int dec[] = {(k+fj1-1)%k, (k+fj2-1)%k};
+
+
+    // We have i1 != j1-1, because otherwise fi2 = fi1 - 1
+
+    // fi1 = fj1 + 1 or fi2 = fj1 + 1
+    if(!contains(remainingOptions, inc[0])) {
+        int fi1 = inc[0];
+        int i1 = inverseList[fi1];
+        int fi2 = list[(i1+1)%k];
+
+        // na fi1, fj2 dan fi2
+        if((fj2 > fi1 && fi2 > fj2) || (fj2 > fi1 && fi2 < fi1-1) || (fi2 < fj1 && fj2 < fi2)) {
+            add(forbiddenNextSteps[dec[1]], (fi2+1)%k);
+            add(forbiddenNextSteps[inc[1]], (fi2+1)%k);
+            add(forbiddenNextSteps[(fi2 + 1)%k], inc[1]);
+        }
+        // na fi1, fi2 dan fj2
+        else {
+            add(forbiddenNextSteps[(k + fi2-1)%k], dec[1]);
+            add(forbiddenNextSteps[(k + fi2-1)%k], inc[1]);
+            add(forbiddenNextSteps[(fi2+1)%k], dec[1]);
+            add(forbiddenNextSteps[dec[1]], (fi2 + 1)%k);
+            add(forbiddenNextSteps[inc[1]], (fi2 + 1)%k);
+        }
+
+        fi2 = inc[0];
+        int i2 = inverseList[fi2];
+        if(i2 != 0) {
+            fi1 = list[(k + i2 -1)%k];
+
+            // na fi2, fi1 dan fj2
+            if((fi1 > fi2 && fj2 > fi1) || (fi1 > fi2 && fj2 < fi2-1) || (fj2 < fj1 && fi1 < fj2)) {
+                add(forbiddenNextSteps[(k + fi1-1)%k], inc[1]);
+                add(forbiddenNextSteps[(fi1+1)%k], dec[1]);
+                add(forbiddenNextSteps[dec[1]], (k + fi1-1)%k);
+                add(forbiddenNextSteps[dec[1]], (fi1+1)%k);
+                add(forbiddenNextSteps[inc[1]], (k + fi1-1)%k);
+                add(forbiddenNextSteps[inc[1]], (fi1+1)%k);
+            }
+            else {
+                add(forbiddenNextSteps[dec[1]], (k+fi1-1)%k);
+                add(forbiddenNextSteps[dec[1]], (fi1+1)%k);
+                add(forbiddenNextSteps[inc[1]], (k+fi1-1)%k);
+                add(forbiddenNextSteps[inc[1]], (fi1+1)%k);
+                add(forbiddenNextSteps[(k + fi1-1)%k], inc[1]);
+                add(forbiddenNextSteps[(fi1+1)%k], dec[1]);
+            }
+        }
+    }
+
+    // fi1 = fj1 - 1 or fi2 = fj1 - 1
+    if(!contains(remainingOptions, dec[0])) {
+        int fi1 = dec[0];
+        int i1 = inverseList[fi1];
+        int fi2 = list[(i1+1)%k];
+
+        // We have i1 != j1-1, because otherwise fi2 = fi1 + 1
+
+        // na fj1, fj2 dan fi2
+        if((fj2 > fj1 && fi2 > fj2) || (fj2 > fj1 && fi2 < fj1-1) || (fi2 < fi1 && fj2 < fi2)) {
+            add(forbiddenNextSteps[dec[1]], (k + fi2 - 1)%k);
+            add(forbiddenNextSteps[inc[1]], (k+fi2-1)%k);
+            add(forbiddenNextSteps[(k + fi2-1)%k], inc[1]);
+            add(forbiddenNextSteps[(fi2 + 1)%k], dec[1]);
+            add(forbiddenNextSteps[(fi2 + 1)%k], inc[1]);
+        }
+
+        // na fj1, fi2 dan fj2
+        else {
+            add(forbiddenNextSteps[(k + fi2-1)%k], dec[1]);
+            add(forbiddenNextSteps[dec[1]], (k + fi2 - 1)%k);
+            add(forbiddenNextSteps[inc[1]], (k + fi2 - 1)%k);
+        }
+
+        fi2 = dec[0];
+        int i2 = inverseList[fi2];
+        if(i2 != 0) {
+            fi1 = list[(k + i2 -1)%k];
+
+            // na fj1, fi1 dan fj2
+            if((fi1 > fj1 && fj2 > fi1) || (fi1 > fj1 && fj2 < fj1-1) || (fj2 < fi2 && fi1 < fj2)) {
+                add(forbiddenNextSteps[(k + fi1-1)%k], inc[1]);
+                add(forbiddenNextSteps[(fi1+1)%k], dec[1]);
+                add(forbiddenNextSteps[dec[1]], (k + fi1-1)%k);
+                add(forbiddenNextSteps[dec[1]], (fi1+1)%k);
+                add(forbiddenNextSteps[inc[1]], (k + fi1-1)%k);
+                add(forbiddenNextSteps[inc[1]], (fi1+1)%k);
+            }
+            else {
+                add(forbiddenNextSteps[dec[1]], (k+fi1-1)%k);
+                add(forbiddenNextSteps[dec[1]], (fi1+1)%k);
+                add(forbiddenNextSteps[inc[1]], (k+fi1-1)%k);
+                add(forbiddenNextSteps[inc[1]], (fi1+1)%k);
+                add(forbiddenNextSteps[(k + fi1-1)%k], inc[1]);
+                add(forbiddenNextSteps[(fi1+1)%k], dec[1]);
+            }
+        }
+    }
+
+    // fi1 = fj2+1 or fi2 = fj2+1
+    if(!contains(remainingOptions, inc[1])) {
+        int fi1 = inc[1];
+        int i1 = inverseList[fi1];
+        int fi2 = list[(i1+1)%k];
+
+        if(fi2 != fj1) {
+            // na fi1, fi2 dan fj1
+            if((fi2 > fi1 && fj1 > fi2) || (fi2 > fi1 && fj1 < fi1-1) || (fj1 < fj2 && fi2 < fj1)) {
+                add(forbiddenNextSteps[(k + fi2 - 1)%k], dec[0]);
+                add(forbiddenNextSteps[(fi2 + 1)%k], dec[0]);
+                add(forbiddenNextSteps[(fi2 + 1)%k], inc[0]);
+                add(forbiddenNextSteps[dec[0]], (fi2+1)%k);
+            }
+            else {
+                add(forbiddenNextSteps[dec[0]], (k+fi2-1)%k);
+                add(forbiddenNextSteps[inc[0]], (k+fi2-1)%k);
+                add(forbiddenNextSteps[inc[0]], (fi2+1)%k);
+                add(forbiddenNextSteps[(k + fi2 - 1)%k], inc[0]);
+
+            }
+        }
+
+        fi2 = inc[1];
+        int i2 = inverseList[fi2];
+        fi1 = list[(k+i2-1)%k];
+
+        if(i2 != 0) {
+            // na fi2, fi1 dan fj1
+            if((fi1 > fi2 && fj1 > fi1) || (fi1 > fi2 && fj1 < fi2-1) || (fj1 < fj2 && fi1 < fj1)) {
+                add(forbiddenNextSteps[(k + fi1 - 1)%k], inc[0]);
+                add(forbiddenNextSteps[(fi1 + 1)%k], dec[0]);
+                add(forbiddenNextSteps[(fi1 + 1)%k], inc[0]);
+                add(forbiddenNextSteps[dec[0]], (k + fi1-1)%k);
+                add(forbiddenNextSteps[dec[0]], (fi1+1)%k);
+            }
+            else {
+                add(forbiddenNextSteps[dec[0]], (k+fi1-1)%k);
+                add(forbiddenNextSteps[dec[0]], (fi1+1)%k);
+                add(forbiddenNextSteps[(k + fi1 - 1)%k], dec[0]);
+
+            }
+        }
+    }
+
+    // fi1 = fj2 - 1 or fi2 = fj2 - 1
+    if(!contains(remainingOptions, dec[1])) {
+        int fi1 = dec[1];
+        int i1 = inverseList[fi1];
+        int fi2 = list[(i1+1)%k];
+
+        if(fi2 != fj1) {
+            // na fj2, fi2 dan fj1
+            if((fi2 > fj2 && fj1 > fi2) || (fi2 > fj2 && fj1 < fj2-1) || (fj1 < fi1 && fi2 < fj1)) {
+                add(forbiddenNextSteps[(fi2 + 1)%k], dec[0]);
+                add(forbiddenNextSteps[dec[0]], (k + fi2-1)%k);
+                add(forbiddenNextSteps[dec[0]], (fi2+1)%k);
+                add(forbiddenNextSteps[inc[0]], (fi2+1)%k);
+            }
+            else {
+                add(forbiddenNextSteps[inc[0]], (k + fi2-1)%k);
+                add(forbiddenNextSteps[(k + fi2 - 1)%k], dec[0]);
+                add(forbiddenNextSteps[(k + fi2 - 1)%k], inc[0]);
+                add(forbiddenNextSteps[(fi2 + 1)%k], inc[0]);
+
+            }
+        }
+
+        fi2 = dec[1];
+        int i2 = inverseList[fi2];
+        fi1 = list[(k+i2-1)%k];
+
+        if(i2 != 0) {
+            // na fj2, fi1 dan fj1
+            if((fi1 > fj2 && fj1 > fi1) || (fi1 > fj2 && fj1 < fj2-1) || (fj1 < fi2 && fi1 < fj1)) {
+                add(forbiddenNextSteps[(fi1 + 1)%k], inc[0]);
+                add(forbiddenNextSteps[inc[0]], (k+fi1-1)%k);
+                add(forbiddenNextSteps[inc[0]], (fi1+1)%k);
+            }
+            else {
+                add(forbiddenNextSteps[inc[0]], (k+fi1-1)%k);
+                add(forbiddenNextSteps[inc[0]], (fi1+1)%k);
+                add(forbiddenNextSteps[(k+fi1 - 1)%k], dec[0]);
+                add(forbiddenNextSteps[(k+fi1 - 1)%k], inc[0]);
+                add(forbiddenNextSteps[(fi1 + 1)%k], dec[0]);
+            }
+        }
+    }
+}
+
+
+// Another method which builds permutations and only accepts the
+// lexicographically smallest after performing several operations. This method
+// does not eliminate all isomorphisms.
+void recursionLexSmallestPerm(nautygraph *g, int list[], int inverseList[],
+ bitset remainingOptions, bitset forbiddenNextSteps[], struct options *options,
+  struct counters *counters, int spokes) {
+
+    // Used for res/mod split.
+    if(spokes == options->splitLevel) {
+
+        //  Count how long the common part of each split takes. Algorithm
+        //  stops as soon as the common part is finished.
+#ifdef COUNT_SPLIT_TIME 
+        return;
+#endif
+
+        options->splitCounter++;
+        if(options->splitCounter == options->modulo) {
+            options->splitCounter = 0;
+        }
+        if(options->splitCounter != options->remainder) {
+            return;
+        }
+    }
+
+    counters->recursionSteps++;
+    counters->nonIsoIntermediateGraph++;
+
+    // Graph is a permutation graph.
+    if(spokes == g->nv/2) {
+
+        writeToG6(g);
+        counters->generatedGraphs++;
+
+        return;
+    }
+
+    // if(!isEmpty(intersection(forbiddenNextSteps[list[spokes - 1]], remainingOptions))) {
+    // //     printGraph(g);
+    // //     printBitset(badOpts);
+    //     counter++;
+    // }
+
+    bitset goodOpts = difference(remainingOptions, forbiddenNextSteps[list[spokes - 1]]);
+
+    bitset forbiddenNextStepsCopy[BITSETSIZE];
+    memcpy(forbiddenNextStepsCopy, forbiddenNextSteps, sizeof(bitset) * BITSETSIZE);
+
+    forEach(el, goodOpts) {
+
+        if(options->minimalGirth > 4) {
+            if(containsForbiddenCycleWithEdge(g, options->minimalGirth, spokes, el+g->nv/2)) continue;
+        }
+
+        list[spokes] = el;
+        inverseList[el] = spokes;
+        bool isSmallest = true;
+
+        // fprintf(stderr, "List: ");
+        // for(int i = 0; i < spokes+1; i++) {
+        //     fprintf(stderr, "%d ", list[i]);
+        // }
+        // fprintf(stderr, "\n");
+
+        if(spokes == g->nv/2 -  1 && !distListIsLexMinimalRot(list, g->nv)) {
+            // fprintf(stderr, "Not lex minimal rotation\n");
+            continue;
+        }
+
+        // Check if mirroring inner cycle is lexicographically smaller:
+        if(!mirroringIsGreater(list, list, spokes, g->nv)) continue;
+
+        // Check if reversing permutation is smaller:
+        if(!reversingIsGreater(list, list, spokes, g->nv)) continue;
+
+        // Check if both cycles are consecutive
+        bitset opts = difference(remainingOptions, singleton(el));
+        int firstOption = next(opts, -1);
+        int secondNonOption = next(setComplement(opts, g->nv/2), 0);
+        if(firstOption <= spokes && secondNonOption < g->nv/2-spokes) {
+
+            addSpoke(g, spokes, el+g->nv/2);
+
+            if(options->nonHamFlag) {
+                add(forbiddenNextSteps[el - 1], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
+                add(forbiddenNextSteps[el - 1], (list[spokes - 1] + 1) % (g->nv/2));
+                add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
+                add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (list[spokes - 1] + 1) % (g->nv/2));
+                add(forbiddenNextSteps[(g->nv/2 + list[spokes - 1] - 1)%(g->nv/2)], (el+1)%(g->nv/2));
+                add(forbiddenNextSteps[(list[spokes - 1] + 1)%(g->nv/2)], (g->nv/2+el-1)%(g->nv/2));
+                addForbiddenSteps(list, inverseList, spokes, remainingOptions, forbiddenNextSteps, g->nv);
+
+                counters->checkHam++;
+                counters->checkHamSpokes[spokes+1]++;
+                if(
+                 addingEdgeGivesHamiltonianCycleCubHam(g, counters, spokes, el+g->nv/2)) {
+
+                    counters->pruneHamSpokes[spokes+1]++;
+                    counters->pruneHam++;
+                    removeSpoke(g, spokes, el+g->nv/2);
+                    memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
+
+
+                    continue;
+                }
+            }
+
+            recursionLexSmallestPerm(g, list, inverseList,
+             difference(remainingOptions, singleton(el)), forbiddenNextSteps,
+              options, counters, spokes+1);
+
+            removeSpoke(g, spokes, el+g->nv/2);
+            memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
+
+            continue;
+        }
+
+        // If both are consecutive we can swap.
+
+        // Swapping cycles is smaller:
+        int swappedList[spokes+1];
+        if(firstOption > spokes) {
+            for(int i = 0; i <= spokes; i++) {
+                swappedList[list[i]] = i;
+            }
+        }
+        else {
+            for(int i = 0; i <= spokes; i++) {
+                swappedList[(g->nv/2 - list[i]) % (g->nv/2)] = i;
+            }
+        }
+        for(int i = 0; i <= spokes; i++) {
+            if(list[i] > swappedList[i]) {
+                isSmallest = false;
+                break;
+            }
+            if(list[i] < swappedList[i]) break;
+        }
+        if(!isSmallest) continue;
+
+
+        // Check if mirroring inner cycle after swap is lexicographically
+        // smaller:
+        if(!mirroringIsGreater(list, swappedList, spokes, g->nv)) continue;
+
+        // Check if reversing permutation after swap is smaller:
+        if(!reversingIsGreater(list, swappedList, spokes, g->nv)) continue;
+
+        // Is this the best place for this check?
+        if(spokes == g->nv/2 - 1 && contains(forbiddenNextSteps[el], list[0])) {
+            continue;
+        }
+
+        addSpoke(g, spokes, el+g->nv/2);
+
+       
+        if(options->nonHamFlag) {
+
+            // Seems to have no effect, but do not see why it should not for very
+            // large n.
+            add(forbiddenNextSteps[el - 1], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
+            add(forbiddenNextSteps[el - 1], (list[spokes - 1] + 1) % (g->nv/2));
+            add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
+            add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (list[spokes - 1] + 1) % (g->nv/2));
+            add(forbiddenNextSteps[(g->nv/2 + list[spokes - 1] - 1)%(g->nv/2)], (el+1)%(g->nv/2));
+            add(forbiddenNextSteps[(list[spokes - 1] + 1)%(g->nv/2)], (g->nv/2+el-1)%(g->nv/2));
+            addForbiddenSteps(list, inverseList, spokes, remainingOptions, forbiddenNextSteps, g->nv);
+            counters->checkHam++;
+            counters->checkHamSpokes[spokes+1]++;
+            if(
+             addingEdgeGivesHamiltonianCycleCubHam(g, counters, spokes, el+g->nv/2)) {
+
+                counters->pruneHamSpokes[spokes+1]++;
+                counters->pruneHam++;
+                removeSpoke(g, spokes, el+g->nv/2);
+                memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
+
+                continue;
+            }
+        }
+
+        // Seems to be lexicographically smallest, so recurse.
+        recursionLexSmallestPerm(g, list, inverseList,
+         difference(remainingOptions, singleton(el)), forbiddenNextSteps,
+          options, counters, spokes+1);
+
+        removeSpoke(g, spokes, el+g->nv/2);
+        memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
     }
 }
 
@@ -2557,13 +3116,29 @@ void generatePermutationGraphs(struct options *options,
     statsblk stats;
     int orbits[g.nv];
     DEFAULTOPTIONS_GRAPH(nautyOptions);
-    nauty_check(WORDSIZE,g.numberOfWords,n,NAUTYVERSIONID);
-    initializeNauty(&g, &stats, &nautyOptions, lab, ptn, orbits);
+
+    if(!options->permutationMethodFlag) {
+        nauty_check(WORDSIZE,g.numberOfWords,n,NAUTYVERSIONID);
+        initializeNauty(&g, &stats, &nautyOptions, lab, ptn, orbits);
+    }
 
     //  Add first spoke, wlog it can always be this one.
     addSpoke(&g, 0, n/2); 
 
-    recursionCCPM(&g, options, counters, 1);
+    if(!options->permutationMethodFlag) {
+        recursionCCPM(&g, options, counters, 1);
+    }
+    else {
+        int list[n/2];
+        int inverseList[n/2];
+        list[0] = 0;
+        inverseList[0] = 0;
+
+        bitset forbiddenNextSteps[BITSETSIZE] = {0};
+        bitset remainingOptions = setComplement(singleton(0), n/2);
+        recursionLexSmallestPerm(&g, list, inverseList, remainingOptions, forbiddenNextSteps,
+         options, counters, 1);
+    }
 
     freeNautyGraph(&g);
     free(generators);
@@ -2606,16 +3181,21 @@ void printStatistics(struct options * options, struct counters * counters,
     if(options->nonHamFlag) {
         fprintf(stderr, 
          "Times check hamiltonian: %llu, " 
-         "Times pruned hamiltonian: %llu (%.2f%% of checks)\n",
-         counters->checkHam, counters->pruneHam, 
-         100.0 * counters->pruneHam / counters->checkHam);
+         "Times expensive check: %llu, "
+         "Times pruned hamiltonian: %llu (%.2f%% of checks, %.2f%% of exp. checks)\n",
+         counters->checkHam, counters->expensiveHam, counters->pruneHam, 
+         100.0 * counters->pruneHam / counters->checkHam,
+         100.0 * counters->pruneHam / counters->expensiveHam);
 
         for(int i = 1; i < n/2+1; i++) {
             fprintf(stderr,
              "Spokes: %2d, \t check ham: %7llu "
-             "\t pruned because ham: %7llu (%.2f%% of checks)\n",
-             i, counters->checkHamSpokes[i], counters->pruneHamSpokes[i],
-             100.0 * counters->pruneHamSpokes[i] / counters->checkHamSpokes[i]);
+             "\t expensive check: %7llu, "
+             "\t pruned because ham: %7llu (%.2f%% of checks, %.2f%% of exp. checks)\n",
+             i, counters->checkHamSpokes[i], 
+             counters->expensiveHamSpokes[i], counters->pruneHamSpokes[i],
+             100.0 * counters->pruneHamSpokes[i] / counters->checkHamSpokes[i],
+             100.0 * counters->pruneHamSpokes[i] / counters->expensiveHamSpokes[i]);
         }
     }
 
@@ -2757,10 +3337,11 @@ int main(int argc, char ** argv) {
             {"girth", required_argument, NULL, 'g'},
             {"help", no_argument, NULL, 'h'},
             {"non-hamiltonian", no_argument, NULL, 'n'},
+            {"permutation-method", no_argument, NULL, 'p'},
             {"verbose", no_argument, NULL, 'v'}
         };
 
-        opt = getopt_long(argc, argv, "g:hnov", long_options, &option_index);
+        opt = getopt_long(argc, argv, "g:hnpv", long_options, &option_index);
         if (opt == -1) break;
         switch(opt) {
             case 'h':
@@ -2778,6 +3359,9 @@ int main(int argc, char ** argv) {
                 break;
             case 'n':
                 options.nonHamFlag = true;
+                break;
+            case 'p':
+                options.permutationMethodFlag = true;
                 break;
             case 'v':
                 options.verboseFlag = true;
@@ -2839,6 +3423,11 @@ int main(int argc, char ** argv) {
     if(options.minimalGirth > 4) {
         options.splitLevel += options.minimalGirth-5;
     }
+
+    if(options.permutationMethodFlag && BITSETSIZE > 64) {
+        fprintf(stderr, "Error: -p only works for 64 bit version.\n");
+        exit(1);
+    } 
 
     fprintf(stderr, "Class=%d/%d. Splitlevel = %d.\n",
      options.remainder, options.modulo, options.splitLevel);
