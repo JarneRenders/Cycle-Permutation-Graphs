@@ -58,4 +58,12 @@ typedef uint64_t bitset;
 
 #define lessThan(set1, set2) (set1 < set2)
 
+
+// DO NOT USE WITH EMPTY SET
+// Returns the first element before current in the set. If there are no more elements, it returns -1.
+// This is unsafe because the behaviour when set is empty is undefined.
+#define prev(set, current) (__builtin_ctzll(set) + 64 - (current) >= 64 ?\
+    -1 :\
+    (current) - __builtin_clzll((set) << (64 - (current))) - 1)
+
 #endif

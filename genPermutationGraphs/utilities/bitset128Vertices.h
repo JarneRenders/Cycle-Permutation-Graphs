@@ -56,6 +56,18 @@ typedef uint64_t bitset __attribute__ ((vector_size (NOFBYTES)));
 #define unsafeNext64(set, current) (__builtin_clzll((set)[1]) + ((current) - 64) >= 63 ? -1 : \
 		 																				(current) + __builtin_ctzll((set)[1] >> ((current) - 64 + 1)) + 1)
 
+#define prev(set, current) (current > 64 ? safePrev64(set, current) : safePrev0(set, current))
+#define safePrev64(set, current) ((set)[1] ?  unsafePrev64(set, current) : safePrev0(set, 64))
+#define safePrev0(set, current) ((set)[0] ? unsafePrev0(set, current) : -1)
+
+#define unsafePrev0(set, current) (__builtin_ctzll(set[0]) + 64 - (current) >= 64 ?\
+    -1 :\
+    (current) - __builtin_clzll((set[0]) << (64 - (current))) - 1)
+
+#define unsafePrev64(set, current) (__builtin_ctzll(set[1]) + 64 - ((current) - 64) >= 64 ?\
+    safePrev0(set, 64) :\
+    (current) - __builtin_clzll((set[1]) << (64 - ((current) - 64))) - 1)
+
 
 //  Checks whether node is an element of set.
 #define contains(set, node) (!isEmpty(intersection((set), singleton(node))))

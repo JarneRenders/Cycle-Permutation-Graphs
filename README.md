@@ -40,21 +40,37 @@ The 64-bit version supports graphs only up to 64 vertices, the 128-bit versions 
 
 All options can be found by executing `./genPermutationGraphs -h`.
 
-Usage: `./genPermutationGraphs [-hv] [-ng#] n [res/mod]`
+Usage: `./genPermutationGraphs [-hv] [-nopsSg#] n [res/mod]`
 
-Generate all pairwise non-isomorphic cycle permutation graphs of a given order n. With -n only non-hamiltonian cycle permutation graphs are generated. With -n# only cycle permutation graphs of girth at least # are generated. Generated graphs are sent to stdout in graph6 format. For more information on the format, see <http://users.cecs.anu.edu.au/~bdm/data/formats.txt>.
+Generate all pairwise non-isomorphic cycle permutation graphs of a given order n. Allows to restrict to graphs with a given lower bound on the girth, non-hamiltonian graphs and permutation snarks generated. Generated graphs are sent to stdout in graph6 format. For more information on the format, see <http://users.cecs.anu.edu.au/~bdm/data/formats.txt>.
 
 The `res/mod` argument, should always appear after the specified order `n`. Otherwise, the order in which the arguments appear does not matter. Be careful not to put an argument immediately after one with an option. E.g. -g#n will not recognize the -n argument.
+
+Without optional arguments, the program will output cycle permutation graphs of order n using the canonical construction path method to generate them. The same result can be obtained by adding -o, but in this case the faster orderly generation approach will be used for the generation.
 
 Mandatory arguments to long options are mandatory for short options too.
 ```
     -h, --help             print help message
     -g, --girth=#          only generate cycle permutation graphs of girth at
                             least #
-    -p, --permutations     use a different generation method; this method WILL
-                            print out isomorphic copies, but is faster
     -n, --non-hamiltonian  only generate non-hamiltonian cycle permutation
                             graphs
+    -o, --strong-orderly-generation
+                           uses the strong orderly generation approach, which
+                            is faster than the canonical construction path method
+                            and outputs no isomorphic copies; slightly slower
+                            than using only -p, which does output isomorphic
+                            copies
+    -p, --permutations     uses the weak orderly generation approach; this
+                            method WILL print out isomorphic copies unless
+                            paired with -o, but is faster
+    -s, --snark-heuristic  can only be used with -p or -o; uses a heuristic
+                            to remove non-permutation snarks from the output;
+                            using -ps and filtering the output afterwards is the
+                            fastest way to obtain all permutation snarks
+    -S, --snark            can only be used with -p or -o; removes all
+                            non-permutation snarks from the output, but is slower
+                            than only using -s
     -v, --verbose          print out extra statistics
     res/mod                split the generation in mod (not necessarily
                             equally large) parts. Here part res will be
@@ -65,6 +81,9 @@ Mandatory arguments to long options are mandatory for short options too.
 
 `./genPermutationGraphs 10`
 Generate all cycle permutation graphs of order 10 and send them to stdout.
+
+`./genPermutationGraphs -o 10`
+Generate all cycle permutation graphs of order 10 and send them to stdout. This method is slightly faster.
 
 `./genPermutationGraphs -n 18`
 Generate all non-hamiltonian cycle permutation graphs of order 18 and send them to stdout.
@@ -77,6 +96,18 @@ Generate all non-hamiltonian cycle permutation graphs of order 18 and girth at l
 
 `./genPermutationGraphs -pn 18`
 Generate all non-hamiltonian cycle permutation graphs of order 18 and send them to stdout. This is slightly faster than without -p, but graphs which are isomorphic will most likely be output.
+
+`./genPermutationGraphs -on 18`
+Generate all non-hamiltonian cycle permutation graphs of order 18 and send them to stdout. This is slightly slower than the previous method but faster than without -o. No isomorphic copies are output.
+
+`./genPermutationGraphs -ps 18`
+Generate all permutation snarks of order 18 and send them to stdout. Isomorphic copies will be output. In theory, this method can output graphs which are not permutation snarks, but in practice this does not happen up to order at least 46. This is the fastest way to generate permutation snarks.
+
+`./genPermutationGraphs -pS 18`
+Generate all permutation snarks of order 18 and send them to stdout. Isomorphic copies will be output. This will only output permutation snarks, but is slightly slower than using -s.
+
+`./genPermutationGraphs -oS 18`
+Generate all permutation snarks of order 18 and send them to stdout. No isomorphic copies will be output, but is slower than using -p. 
 
 ## isPermutationGraph
 ### Short manual

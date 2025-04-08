@@ -4,36 +4,53 @@
  * Author: Jarne Renders (jarne.renders@kuleuven.be)
  * 
  * Generate all pairwise non-isomorphic cycle permutation graphs of a given
- * order n. With -n only non-hamiltonian cycle permutation graphs are
- * generated.
+ * order n. Can restrict girth, hamiltonian and 3-edge-colourable examples.
  *
  */
 
 
 #define USAGE \
-"Usage: ./genPermutationGraphs [-hv] [-ng#] n [res/mod]\n"
+"Usage: ./genPermutationGraphs [-hv] [-nopsSg#] n [res/mod]\n"
 
 #define HELPTEXT "\
 Helptext: Generate all pairwise non-isomorphic cycle permutation graphs of a\n\
-given order n. With -n only non-hamiltonian cycle permutation graphs are\n\
-generated. With -n# only cycle permutation graphs of girth at least # are\n\
-generated. Generated graphs are sent to stdout in graph6 format. For more\n\
-information on the format, see\n\
-http://users.cecs.anu.edu.au/~bdm/data/formats.txt.\n\
+given order n. Allows to restrict to graphs with a given lower bound on the\n\
+girth, non-hamiltonian graphs and permutation snarks generated. Generated\n\
+graphs are sent to stdout in graph6 format. For more information on the format,\n\
+see http://users.cecs.anu.edu.au/~bdm/data/formats.txt.\n\
 \n\
 The `res/mod` argument, should always appear after the specified order `n`.\n\
 Otherwise, the order in which the arguments appear does not matter. Be\n\
 careful not to put an argument immediately after one with an option. E.g.\n\
 -g#n will not recognize the -n argument.\n\
 \n\
+Without optional arguments, the program will output cycle permutation graphs\n\
+of order n using the canonical construction path method to generate them. The\n\
+same result can be obtained by adding -o, but in this case the faster orderly\n\
+generation approach will be used for the generation.\n\
+\n\
 Mandatory arguments to long options are mandatory for short options too.\n\
     -h, --help             print help message\n\
-    -p, --permutations     use a different generation method; this method WILL\n\
-                            print out isomorphic copies, but is faster\n\
     -g, --girth=#          only generate cycle permutation graphs of girth at\n\
                             least #\n\
     -n, --non-hamiltonian  only generate non-hamiltonian cycle permutation\n\
                             graphs\n\
+    -o, --strong-orderly-generation\n\
+                           uses the strong orderly generation approach, which\n\
+                            is faster than the canonical construction path method\n\
+                            and outputs no isomorphic copies; slightly slower\n\
+                            than using only -p, which does output isomorphic\n\
+                            copies\n\
+    -p, --permutations     uses the weak orderly generation approach; this\n\
+                            method WILL print out isomorphic copies unless\n\
+                            paired with -o, but is faster\n\
+    -s, --snark-heuristic  can only be used with -p or -o; uses a heuristic\n\
+                            to remove non-permutation snarks from the output;\n\
+                            using -ps and filtering the output afterwards is the\n\
+                            fastest way to obtain all permutation snarks\n\
+    -S, --snark            can only be used with -p or -o; removes all\n\
+                            non-permutation snarks from the output, but is slower\n\
+                            than only using -s\n\
     -v, --verbose          print out extra statistics\n\
     res/mod                split the generation in mod (not necessarily\n\
                             equally large) parts. Here part res will be\n\
@@ -121,6 +138,25 @@ typedef struct {
     int *orbits;
 } nautygraph;
 
+// Struct keeping all distance lists of the current graph represented as a
+// partial permutation.
+struct distanceLists {
+    int distList[BITSETSIZE];
+    bitset distMatch; // Start indices of suffixes which are prefixes.
+    int revDistList[BITSETSIZE];
+    bitset revMatch;
+    int mirDistList[BITSETSIZE];
+    int mirRevDistList[BITSETSIZE];
+    int swapDistList[BITSETSIZE];
+    bitset swapMatch;
+    int swapRevDistList[BITSETSIZE];
+    bitset swapRevMatch;
+    int swapMirDistList[BITSETSIZE];
+    bitset swapMirMatch;
+    int swapMirRevDistList[BITSETSIZE];
+    bitset swapMirRevMatch;
+};
+
 // Method for freeing the allocated variables of the above struct.
 void freeNautyGraph(nautygraph *g) {
     free(g->adjacencyList);
@@ -199,6 +235,9 @@ struct options {
     bool nonHamFlag;
     bool verboseFlag;
     bool permutationMethodFlag;
+    bool snarkHeuristicFlag;
+    bool snarkFlag;
+    bool strongMethodFlag;
 };
 
 // Many counters for keeping statistics.
@@ -255,6 +294,9 @@ struct counters {
     long long unsigned int notRepresentative;
     long long unsigned int expensiveHam;
     long long unsigned int expensiveHamSpokes[BITSETSIZE];
+    long long unsigned int callsToBooths;
+    long long unsigned int prunedEvenTwoFactor;
+    long long unsigned int prunedEvenTwoFactorWithCrossings[BITSETSIZE];
 };
 
 // Global variables needed for storing the generators of the automorphism group
@@ -2161,6 +2203,139 @@ bool addNewCyclePairs(nautygraph *g, struct counters *counters, int u, int v) {
      g->nde/2 - g->nv, deg2UNbrs);
 }
 
+// Checks if bitset cycle is a cycle. Use only for induced cycles, might give
+// false negative if cycle is not induced.
+bool isCycle(nautygraph *g, bitset cycle) {
+
+    bitset remaining = cycle;
+    int start = next(cycle, -1);
+    int currentVertex = start;
+    int nextVertex = next(intersection(g->bitsetList[currentVertex], cycle),
+     -1);
+
+    while(nextVertex != -1) {
+
+        removeElement(remaining, currentVertex);
+        currentVertex = nextVertex;
+
+        bitset nbrs = intersection(g->bitsetList[currentVertex], remaining);
+        nextVertex = next(nbrs, -1);
+    } 
+    if(size(remaining) != 1) return false;
+    if(!contains(g->bitsetList[currentVertex], start)) return false;
+
+    return true;
+}
+
+// Recursively build an induced cycle which will be part of a consecutive
+// permutation 2-factor. 
+bool partOfConsecutiveCyclePairOrderlyGeneration(nautygraph *g, int list[],
+ int start, int last, bitset cycle, bitset remainingVertices) {
+
+    bitset nbrs = g->bitsetList[last];
+
+    // If last element already has two neighbours in cycle it is not induced.
+    if(size(cycle) < g->nv/2) {
+
+        if(size(intersection(nbrs, cycle)) > 1) {
+            return false;
+        }
+
+        // If not full cycle, but last adjacent to start, we will not make induced
+        // cycle. 
+        if(contains(nbrs, start) && size(cycle) > 2) {
+            // fprintf(stderr, "Here\n");
+            return false;
+        }
+    }
+
+    
+    if(size(cycle) == g->nv/2 && contains(nbrs, start)) {
+
+        // Check if complement is cycle, then we have permutation 2-factor
+        if(!isCycle(g, setComplement(cycle, g->nv))) return false;
+
+        // Add it
+        int cycleListSize = 100 > (1 << (g->nv/4)) ? 100 : (1 << (g->nv/4)); 
+        if(g->nCyclePairs >= cycleListSize) {
+            fprintf(stderr,
+             "Error: out of memory when storing induced cycle pair.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        if(!contains(cycle, 0)) cycle = setComplement(cycle, g->nv);
+        g->inducedCyclePairs[g->nCyclePairs] = cycle;
+        g->nCyclePairs++;
+
+        return true;
+    }
+    else if(size(cycle) == g->nv/2) return false;
+
+
+    // if(!isEmpty(intersection(nbrs, g->degree2))) {
+    //     fprintf(stderr, "Error: should not happen!\n");
+    // }
+
+    bool found = false;
+
+    nbrs = intersection(nbrs, remainingVertices);
+    forEach(nbr, nbrs) {
+
+        // If nbr is adjacent to a degree 2 vertex, then it belongs to cycle2
+        if(!isEmpty(intersection(g->bitsetList[nbr], g->degree2))) continue;
+
+        if(partOfConsecutiveCyclePairOrderlyGeneration(g, list, start, nbr,
+         union(cycle, singleton(nbr)),
+         difference(remainingVertices, nbrs))) {
+            found = true;
+        }
+    }
+
+    return found;
+}
+
+
+// Add all the consecutive permutation 2-factors containing uv to the list. We
+// only store data needed for the orderly generation method.
+bool addNewCyclePairsOrderlyGeneration(nautygraph *g, int list[],
+ struct counters *counters, int u, int v) {
+
+    counters->calledAddNewCycles++;
+
+    // Such a new pair cannot exist if the newly added edge had 2 or more degree
+    // 2 neighbours. (Proof in manuscript.)
+    bitset deg2UNbrs = intersection(g->degree2, g->bitsetList[u]);
+    int deg2NbrsU = size(deg2UNbrs);
+    int deg2NbrsV = size(intersection(g->degree2, g->bitsetList[v]));
+
+    if(deg2NbrsU+deg2NbrsV > 1) {
+        counters->addNewCyclesAndMoreThanOneDeg2Nbr++;
+        return false;
+    }
+
+    // uv and the path of degree 2 vertices on the cycle containing u as well as
+    // 0 belong to one cycle.
+    bitset cycle0 = union(singleton(u), singleton(v));
+    cycle0 = union(cycle0, intersection(g->degree2, g->inducedCyclePairs[0]));
+    add(cycle0, 0);
+    int start = 0;
+    bitset remainingVertices = setComplement(cycle0, g->nv);
+
+    // If no degree 2 vertices, then 0 need not belong to cycle0.
+    if(list[g->nv/2-1] != INT_MAX) {
+        cycle0 = union(singleton(u), singleton(v));
+        remainingVertices = setComplement(cycle0, g->nv);
+        start = u;
+    }
+
+    // We now build induced cycles using backtracking starting with uv, building
+    // a path of degree 3 vertices and finishing with degree 2 vertices
+    // (unless g is cubic already). One can show that all consecutive
+    // permutation 2-factors must contain an induced cycle of this form.
+    return partOfConsecutiveCyclePairOrderlyGeneration(g, list, start, v, cycle0,
+     remainingVertices);
+}
+
 // We assume that uv is not an edge of any 2-factor in the list and remove
 // consecutive permutation 2-factors of g-uv in which u and v lie on the same
 // induced cycle. 
@@ -2630,11 +2805,143 @@ bool distListIsLexMinimalRot(int list[], int n) {
     return true;   
 }
 
-void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remainingOptions, bitset forbiddenNextSteps[], int n) {
+
+//******************************************************************************
+//
+//                  Orderly generation method
+//
+//******************************************************************************
+
+
+//******************************************************************************
+//
+//              Dealing with distance lists
+//
+//******************************************************************************
+
+void initDistanceLists(struct distanceLists *L) {
+    for(int i = 0; i < BITSETSIZE; i++) {
+        L->distList[i] = INT_MAX;
+        L->revDistList[i] = INT_MAX;
+        L->mirDistList[i] = INT_MAX;
+        L->mirRevDistList[i] = INT_MAX;
+        L->swapDistList[i] = INT_MAX;
+        L->swapRevDistList[i] = INT_MAX;
+        L->swapMirDistList[i] = INT_MAX;
+        L->swapMirRevDistList[i] = INT_MAX;
+    }
+    L->distMatch = EMPTY;
+    L->revMatch = EMPTY;
+    L->swapMatch = EMPTY;
+    L->swapRevMatch = EMPTY;
+    L->swapMirMatch = EMPTY;
+    L->swapMirRevMatch = EMPTY;
+}
+
+// Dynamically update the distance lists after adding el to the list.
+void updateDistanceLists(int list[], int swappedList[],
+ struct distanceLists *L, int spokes, int el, int k) {
+
+    L->distList[spokes - 1] = (k + list[spokes] - list[spokes - 1]) % k;
+    L->mirDistList[k - 1 - (spokes - 1)] = L->distList[spokes - 1];
+    L->revDistList[spokes - 1] = k - L->distList[spokes - 1];
+    L->mirRevDistList[k - 1 - (spokes - 1)] = k - L->distList[spokes - 1];
+
+    int inc = (el + 1)%k;
+    if(swappedList[inc] != INT_MAX) {
+        L->swapDistList[el] = 
+         (k + swappedList[inc] - swappedList[el]) % k;
+        L->swapMirDistList[k - 1 - (el)] = L->swapDistList[el];
+        L->swapRevDistList[el] = k - L->swapDistList[el];
+        L->swapMirRevDistList[k - 1 - (el)] = k - L->swapDistList[el];
+    }
+
+    int dec = (k + el - 1)%k;
+    if(swappedList[dec] != INT_MAX) {
+        L->swapDistList[dec] = 
+         (k + swappedList[el] - swappedList[dec]) % k;
+        L->swapMirDistList[k - 1 - (dec)] = L->swapDistList[dec];
+        L->swapRevDistList[dec] = k - L->swapDistList[dec];
+        L->swapMirRevDistList[k - 1 - (dec)] = k - L->swapDistList[dec];
+    }
+
+    if(spokes != k-1) return;
+
+    // Set distances between k-1 and 0
+    L->distList[k-1] = (k + list[0] - list[k-1]) % k;
+    L->mirDistList[0] = L->distList[k-1];
+    L->revDistList[k-1] = k - L->distList[k-1];
+    L->mirRevDistList[0] = k - L->distList[k-1];
+ 
+}
+
+// Remove the previous update if when we remove el from the list while
+// backtracking.
+void revertDistanceLists(int list[], int swappedList[],
+ struct distanceLists *L, bitset copies[], int spokes, int el, int k) {
+
+    L->distList[spokes - 1] = INT_MAX;
+    L->mirDistList[k - 1 - (spokes - 1)] = INT_MAX;
+    L->revDistList[spokes - 1] = INT_MAX;
+    L->mirRevDistList[k - 1 - (spokes - 1)] = INT_MAX;
+
+    L->swapDistList[el] = INT_MAX;
+    L->swapMirDistList[k - 1 - (el)] = INT_MAX;
+    L->swapRevDistList[el] = INT_MAX;
+    L->swapMirRevDistList[k - 1 - (el)] = INT_MAX;
+
+    int dec = (k + el - 1)%k;
+    L->swapDistList[dec] = INT_MAX;
+    L->swapMirDistList[k - 1 - (dec)] = INT_MAX;
+    L->swapRevDistList[dec] = INT_MAX;
+    L->swapMirRevDistList[k - 1 - (dec)] = INT_MAX;
+
+    L->distMatch = copies[0];
+    L->revMatch = copies[1];
+    L->swapMatch = copies[2];
+    L->swapRevMatch = copies[3];
+    L->swapMirMatch = copies[4];
+    L->swapMirRevMatch = copies[5];
+
+    if(spokes != k-1) return;
+
+    // Reset distances between k-1 and 0;
+    L->distList[k-1] = INT_MAX;
+    L->mirDistList[0] = INT_MAX;
+    L->revDistList[k-1] = INT_MAX;
+    L->mirRevDistList[0] = INT_MAX;
+ 
+}
+
+
+//******************************************************************************
+//
+//              Predetection of some hamiltonian cycles
+//
+//******************************************************************************
+
+// Add pairs to forbiddenNextSteps which if added consecutively would give a
+// hamiltonian cycle that crosses the cycles of the perm 2-factor 4 or 6 times.
+// If forbiddenNextSteps[x] contains y, we cannot add y to list if the previous
+// element was x.
+void addForbiddenSteps(int list[], int inverseList[], int spokes,
+ bitset remainingOptions, bitset forbiddenNextSteps[], int k) {
+
+    // Forbid pairs giving hamiltonian cycle with 4 crossings
+
+    int el = list[spokes];
+    add(forbiddenNextSteps[el - 1], (k + list[spokes - 1] - 1) % k);
+    add(forbiddenNextSteps[el - 1], (list[spokes - 1] + 1) % k);
+    add(forbiddenNextSteps[(el + 1)%k], (k + list[spokes - 1] - 1) % k);
+    add(forbiddenNextSteps[(el + 1)%k], (list[spokes - 1] + 1) % k);
+    add(forbiddenNextSteps[(k + list[spokes - 1] - 1)%k], (el+1) % k);
+    add(forbiddenNextSteps[(list[spokes - 1] + 1)%k], (k+el-1) % k);
+
+    // Forbid pairs giving hamiltonian cycle with 6 crossings
+
     int fj1 = list[spokes - 1];
     int fj2 = list[spokes];
 
-    int k = n/2;
     int inc[] = {(fj1+1)%k, (fj2+1)%k};
     int dec[] = {(k+fj1-1)%k, (k+fj2-1)%k};
 
@@ -2648,7 +2955,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
         int fi2 = list[(i1+1)%k];
 
         // na fi1, fj2 dan fi2
-        if((fj2 > fi1 && fi2 > fj2) || (fj2 > fi1 && fi2 < fi1-1) || (fi2 < fj1 && fj2 < fi2)) {
+        if((fj2 > fi1 && fi2 > fj2) || (fj2 > fi1 && fi2 < fi1-1) ||
+         (fi2 < fj1 && fj2 < fi2)) {
             add(forbiddenNextSteps[dec[1]], (fi2+1)%k);
             add(forbiddenNextSteps[inc[1]], (fi2+1)%k);
             add(forbiddenNextSteps[(fi2 + 1)%k], inc[1]);
@@ -2668,7 +2976,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
             fi1 = list[(k + i2 -1)%k];
 
             // na fi2, fi1 dan fj2
-            if((fi1 > fi2 && fj2 > fi1) || (fi1 > fi2 && fj2 < fi2-1) || (fj2 < fj1 && fi1 < fj2)) {
+            if((fi1 > fi2 && fj2 > fi1) || (fi1 > fi2 && fj2 < fi2-1) ||
+             (fj2 < fj1 && fi1 < fj2)) {
                 add(forbiddenNextSteps[(k + fi1-1)%k], inc[1]);
                 add(forbiddenNextSteps[(fi1+1)%k], dec[1]);
                 add(forbiddenNextSteps[dec[1]], (k + fi1-1)%k);
@@ -2696,7 +3005,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
         // We have i1 != j1-1, because otherwise fi2 = fi1 + 1
 
         // na fj1, fj2 dan fi2
-        if((fj2 > fj1 && fi2 > fj2) || (fj2 > fj1 && fi2 < fj1-1) || (fi2 < fi1 && fj2 < fi2)) {
+        if((fj2 > fj1 && fi2 > fj2) || (fj2 > fj1 && fi2 < fj1-1) ||
+         (fi2 < fi1 && fj2 < fi2)) {
             add(forbiddenNextSteps[dec[1]], (k + fi2 - 1)%k);
             add(forbiddenNextSteps[inc[1]], (k+fi2-1)%k);
             add(forbiddenNextSteps[(k + fi2-1)%k], inc[1]);
@@ -2717,7 +3027,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
             fi1 = list[(k + i2 -1)%k];
 
             // na fj1, fi1 dan fj2
-            if((fi1 > fj1 && fj2 > fi1) || (fi1 > fj1 && fj2 < fj1-1) || (fj2 < fi2 && fi1 < fj2)) {
+            if((fi1 > fj1 && fj2 > fi1) || (fi1 > fj1 && fj2 < fj1-1) ||
+             (fj2 < fi2 && fi1 < fj2)) {
                 add(forbiddenNextSteps[(k + fi1-1)%k], inc[1]);
                 add(forbiddenNextSteps[(fi1+1)%k], dec[1]);
                 add(forbiddenNextSteps[dec[1]], (k + fi1-1)%k);
@@ -2744,7 +3055,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
 
         if(fi2 != fj1) {
             // na fi1, fi2 dan fj1
-            if((fi2 > fi1 && fj1 > fi2) || (fi2 > fi1 && fj1 < fi1-1) || (fj1 < fj2 && fi2 < fj1)) {
+            if((fi2 > fi1 && fj1 > fi2) || (fi2 > fi1 && fj1 < fi1-1) ||
+             (fj1 < fj2 && fi2 < fj1)) {
                 add(forbiddenNextSteps[(k + fi2 - 1)%k], dec[0]);
                 add(forbiddenNextSteps[(fi2 + 1)%k], dec[0]);
                 add(forbiddenNextSteps[(fi2 + 1)%k], inc[0]);
@@ -2765,7 +3077,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
 
         if(i2 != 0) {
             // na fi2, fi1 dan fj1
-            if((fi1 > fi2 && fj1 > fi1) || (fi1 > fi2 && fj1 < fi2-1) || (fj1 < fj2 && fi1 < fj1)) {
+            if((fi1 > fi2 && fj1 > fi1) || (fi1 > fi2 && fj1 < fi2-1) ||
+             (fj1 < fj2 && fi1 < fj1)) {
                 add(forbiddenNextSteps[(k + fi1 - 1)%k], inc[0]);
                 add(forbiddenNextSteps[(fi1 + 1)%k], dec[0]);
                 add(forbiddenNextSteps[(fi1 + 1)%k], inc[0]);
@@ -2789,7 +3102,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
 
         if(fi2 != fj1) {
             // na fj2, fi2 dan fj1
-            if((fi2 > fj2 && fj1 > fi2) || (fi2 > fj2 && fj1 < fj2-1) || (fj1 < fi1 && fi2 < fj1)) {
+            if((fi2 > fj2 && fj1 > fi2) || (fi2 > fj2 && fj1 < fj2-1) ||
+             (fj1 < fi1 && fi2 < fj1)) {
                 add(forbiddenNextSteps[(fi2 + 1)%k], dec[0]);
                 add(forbiddenNextSteps[dec[0]], (k + fi2-1)%k);
                 add(forbiddenNextSteps[dec[0]], (fi2+1)%k);
@@ -2810,7 +3124,8 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
 
         if(i2 != 0) {
             // na fj2, fi1 dan fj1
-            if((fi1 > fj2 && fj1 > fi1) || (fi1 > fj2 && fj1 < fj2-1) || (fj1 < fi2 && fi1 < fj1)) {
+            if((fi1 > fj2 && fj1 > fi1) || (fi1 > fj2 && fj1 < fj2-1) ||
+             (fj1 < fi2 && fi1 < fj1)) {
                 add(forbiddenNextSteps[(fi1 + 1)%k], inc[0]);
                 add(forbiddenNextSteps[inc[0]], (k+fi1-1)%k);
                 add(forbiddenNextSteps[inc[0]], (fi1+1)%k);
@@ -2826,13 +3141,701 @@ void addForbiddenSteps(int list[], int inverseList[], int spokes, bitset remaini
     }
 }
 
+// -1 means list1 < list2 if both are shifted with shift1, resp shift2
+// 0 means equals
+// 1 means list1 > list2
+int cmpShiftedList(int list1[], int shift1, int list2[], int shift2, int k) {
+    for(int i = 0; i < k; i++) {
+        int v1 = list1[(i+shift1)%k];
+        int v2 = list2[(i+shift2)%k];
+        if(v1 < v2) return -1;
+        if(v1 > v2) return 1;
+    }
+    return 0;
+}
+
+// Assumes shift1 = 0 and list2 is double the list we want to check (so no mod k
+// necessary)
+int cmpShiftedListFast(int list1[], int shift1, int list2[], int shift2, int k) {
+    for(int i = 0; i < k; i++) {
+        int v1 = list1[i];
+        int v2 = list2[i+shift2];
+        if(v1 < v2) return -1;
+        if(v1 > v2) return 1;
+    }
+    return 0;
+}
+
+// Adaptation of Booth's algorithm to check if list (with length k) has a cyclic
+// rotation which is lexicographically smaller than oldList.
+bool isMinimalWrtRotations(struct counters *counters, int oldList[], int list[],
+ int k) {
+
+    counters->callsToBooths++;
+
+    // Seems faster to work with double list rather than taking modulo often.
+    // Create two copies of list and failure function f.
+    int newList[2*k];
+    int f[2*k];
+    for(int i  = 0; i < k; i++) {
+        newList[i] = list[i];
+        newList[k+i] = list[i]; 
+        f[i] = -1;
+        f[k+i] = -1;
+    }
+
+    int idx = 0; // Will be the index to be returned.
+    if(cmpShiftedListFast(oldList, 0, newList, idx, k) > 0) return false;
+    for(int i = 1; i < 2*k; i++) {
+        int j = f[i - idx - 1];
+        while(j != -1 && newList[i] != newList[idx + j + 1]) {
+            if(newList[i] < newList[idx + j + 1]) {
+                idx = i - j - 1;
+                if(cmpShiftedListFast(oldList, 0, newList, idx, k) > 0) {
+                    return false;
+                }
+            }
+            j = f[j];
+        }
+        if(newList[i] != newList[idx + j + 1]) {
+            if(newList[i] < newList[idx]) {
+                idx = i;
+                if(cmpShiftedListFast(oldList, 0, newList, idx, k) > 0) {
+                    return false;
+                }
+            }
+            f[i - idx] = -1;
+        }
+        else {
+            f[i - idx] = j + 1;
+        }
+    }
+
+    return true;
+
+}
+
+// Used instead of bool to make function call more clear.
+enum Mirror {
+    Mirrored,
+    NotMirrored
+};
+
+// Checks if we can prune based on given non-swapped, non-mirrored distance
+// list.
+bool pruneNotSwappedNotMirroredLists(int origDistList[], int distListToCheck[],
+ bitset *matches, int spokes, int k) {
+
+    // Check if new distance is less than start of original.
+    if(distListToCheck[spokes - 1] < origDistList[0]) return true;
+
+    // For each suffix of the list which minus the final character is also a
+    // prefix, check if we are smaller than prefix otherwise check if it is
+    // still a prefix. If complete permutation do a better check.
+    forEach(idx, (*matches)) {
+        int cmpIdx = spokes - 1 - idx;
+        if(distListToCheck[spokes - 1] < origDistList[cmpIdx]) return true;
+        if(distListToCheck[spokes - 1] > origDistList[cmpIdx]) {
+            removeElement((*matches), idx);
+        }
+        if(spokes == k-1) {
+            if(cmpShiftedList(origDistList, 0, distListToCheck, idx, k) > 0) {
+                return true;
+            }
+        }
+    }
+
+    // If new element is equal to first distance it is a new suffix which is a
+    // prefix.
+    if(distListToCheck[spokes - 1] == origDistList[0]) {
+        add((*matches), spokes - 1);
+    } 
+
+    // If full permutation check if shifting to before last or last element
+    // gives smaller distance list.
+    if(spokes == k-1) {
+        if(cmpShiftedList(origDistList, 0, distListToCheck, spokes - 1, k) > 0
+         || cmpShiftedList(origDistList, 0, distListToCheck, spokes, k) > 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Checks if we can prune based on given non-swapped mirrored distance list. If
+// we have a complete permutation just check the cyclic rotation which gives
+// the lexicographically minimal list. Otherwise only check rotation of last
+// added index.
+bool pruneNotSwappedMirroredLists(struct counters *counters, int origDistList[],
+ int distListToCheck[], int spokes, int k) {
+
+    if(spokes != k-1) {
+        if(cmpShiftedList(origDistList, 0, distListToCheck, k - spokes, k)
+         > 0) {
+            return true;
+        }
+    }
+    else {
+        if(!isMinimalWrtRotations(counters, origDistList, distListToCheck, k)
+         ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// Checks if we can prune based on given swapped distance list (which can also
+// be mirrored and or reversed). Is slower than checking non-swapped list as we
+// have less information about their structure.
+bool pruneSwappedLists(int list[], int origDistList[], int distListToCheck[],
+ bitset *matches, int spokes, int k, enum Mirror isMirrored) {
+
+    // Choose indices which might have been added in this recursion step.
+    // Depends on whether list is mirrored or not.
+    int el;
+    int nbr;
+    if(isMirrored == Mirrored) {
+        el = (k + k - 1 - list[spokes]) % k;
+        nbr = (el + 1) % k;
+    }
+    else {
+        el = list[spokes];
+        nbr = (k + el - 1) % k;
+    }
+
+    // Check if new indices are smaller than start of origDistList
+    if(distListToCheck[el] < origDistList[0]) return true;
+    if(distListToCheck[nbr] < origDistList[0]) return true;
+
+    // If they are the same store that we have a new suffix which is also a
+    // prefix.
+    if(distListToCheck[el] == origDistList[0]) {
+        add((*matches), el);
+    }
+    if(distListToCheck[nbr] == origDistList[0]) {
+        add((*matches), nbr);
+    }
+
+    // For every such suffix, compare if they are now smaller than the prefix
+    // (with the addition of the possibly two new entries). By storing extra
+    // info some redundant checking can be avoided here, but this is not a
+    // bottleneck.
+    forEach(idx, (*matches)) {
+        int i = idx+1;
+        while(distListToCheck[i%k] != INT_MAX && (i%k != idx%k)) {
+            if(distListToCheck[i%k] < origDistList[(i - idx)%k]) return true;
+            if(distListToCheck[i%k] > origDistList[(i - idx)%k]) {
+                removeElement((*matches), idx);
+                break;
+            }
+
+            i++;
+        }
+    }
+    return false;
+}
+
+// Check if any of the 8 distance lists has a cyclic rotation which is
+// lexicographically smaller than the original distList.
+bool pruneLists(struct counters *counters, int list[], int origDistList[],
+ struct distanceLists *L, int spokes, int k) {
+
+    // Comparing normal distList
+    if(pruneNotSwappedNotMirroredLists(origDistList, L->distList,
+     &(L->distMatch), spokes, k)) {
+        return true;
+    }
+
+    // Comparing mirror
+    if(pruneNotSwappedMirroredLists(counters, origDistList, L->mirDistList,
+     spokes, k)) {
+        return true;
+    }
+
+    // Comparing reverse 
+    if(pruneNotSwappedNotMirroredLists(origDistList, L->revDistList,
+     &(L->revMatch), spokes, k)) {
+        return true;
+    }
+
+    // Comparing reverse and mirror 
+    if(pruneNotSwappedMirroredLists(counters, origDistList, L->mirRevDistList,
+     spokes, k)) {
+        return true;
+    }
+
+    // Comparing swapped dist list
+    // There might be some slight double checking here
+    if(pruneSwappedLists(list, origDistList, L->swapDistList, &(L->swapMatch),
+     spokes, k, NotMirrored)) return true;
+
+    // Comparing swapped reversed list
+    if(pruneSwappedLists(list, origDistList, L->swapRevDistList,
+     &(L->swapRevMatch), spokes, k, NotMirrored)) return true;
+
+    // Mirrored Swapped
+    if(pruneSwappedLists(list, origDistList, L->swapMirDistList,
+     &(L->swapMirMatch), spokes, k, Mirrored)) return true;
+
+    // Mirrored Reversed Swapped
+    if(pruneSwappedLists(list, origDistList, L->swapMirRevDistList,
+     &(L->swapMirRevMatch), spokes, k, Mirrored)) return true;
+
+    return false;
+}
+
+// If rotating permutation gives smaller one, prune.
+// New index is the index of distList containing the newly added element. If it
+// is preceded by an INT_MAX only the shift that starts with this new element
+// is a candidate to be minimum.
+bool pruneList(struct counters *counters, int origDistList[], int distList[],
+ int newIdx, int k) {
+
+    if(distList[(k + newIdx - 1)%k] == INT_MAX) {
+        return cmpShiftedList(origDistList, 0, distList, newIdx, k) > 0;
+    }
+
+    return !isMinimalWrtRotations(counters, origDistList, distList, k);
+}
+
+// New index is the index of distList containing the newly added element. If it
+// is preceded by an INT_MAX in the transformed list only the shift that starts
+// with this new element is a candidate to be minimum. Otherwise it would have
+// been pruned in a previous iteration.
+bool pruneMirrorList(struct counters *counters, int origDistList[],
+ int distList[], int newIdx, int k) {
+    int distMirList[k];
+    for(int i = 0; i < k; i++) {
+        distMirList[k - 1 - i] = distList[i];
+    }
+
+
+    if(distMirList[(k + k - newIdx - 1)%k] == INT_MAX) {
+        return cmpShiftedList(origDistList, 0, distMirList, k - newIdx, k) > 0;
+    }
+    
+    return !isMinimalWrtRotations(counters, origDistList, distMirList, k);
+}
+
+// New index is the index of distList containing the newly added element. If it
+// is preceded by an INT_MAX in the transformed list only the shift that starts
+// with this new element is a candidate to be minimum. Otherwise it would have
+// been pruned in a previous iteration.
+bool pruneReverseList(struct counters *counters, int origDistList[],
+ int distList[], int newIdx, int k) {
+    int distRevList[k];
+    for(int i = 0; i < k; i++) {
+        if(distList[i] == INT_MAX) {
+            distRevList[i] = INT_MAX;
+            continue;
+        }
+        distRevList[i] = k - distList[i];
+    }
+
+    if(distRevList[(k + newIdx - 1)%k] == INT_MAX) {
+        return cmpShiftedList(origDistList, 0, distRevList, newIdx, k) > 0;
+    }
+
+    return !isMinimalWrtRotations(counters, origDistList, distRevList, k);
+}
+
+bool pruneMirrorAndReverseList(struct counters *counters, int origDistList[],
+ int distList[], int newIdx, int k) {
+    int distRevMirList[k];
+    for(int i = 0; i < k; i++) {
+        if(distList[i] == INT_MAX) {
+            distRevMirList[k - 1 - i] = INT_MAX;
+            continue;
+        }
+        distRevMirList[k - 1 - i] = k - distList[i];
+    }
+
+    if(distRevMirList[(k + k - newIdx - 1)%k] == INT_MAX) {
+        return cmpShiftedList(origDistList, 0, distRevMirList, k - newIdx, k)
+         > 0;
+    }
+
+    return !isMinimalWrtRotations(counters, origDistList, distRevMirList, k);
+}
+
+void populateDistList(int list[], int distList[], int k) {
+    for(int i = 0; i < k; i++) {
+        if(list[i] == INT_MAX || list[(i+1)%k] == INT_MAX) {
+            distList[i] = INT_MAX;
+            continue;
+        }
+        distList[i] = (k + list[(i+1)%k] - list[i]) % k;
+    }
+} 
+
+bool pruneOtherPerm2Factors(nautygraph *g, struct counters *counters,
+ int list[], struct distanceLists *L, int spokes, int k) {
+
+    for(int i = 1; i < g->nCyclePairs; i++) {
+        bitset cycle1 = g->inducedCyclePairs[i];
+        bitset cycle2 = setComplement(cycle1, g->nv);
+
+        int labC2[g->nv];
+
+        // 0 should always have a spoke
+        int start = next(intersection(g->bitsetList[0], cycle2), -1);
+        int curr = start;
+        int prev = curr;
+
+        int j = 0;
+
+        do {
+            labC2[curr] = j;
+
+            int next = next(difference(intersection(g->bitsetList[curr],
+             cycle2), singleton(prev)), -1);
+            prev = curr;
+            curr = next;
+            j++;
+        } while(curr != start);
+
+
+        struct distanceLists newL = {0};
+        initDistanceLists(&newL);
+
+        start = 0;
+        curr = start;
+        prev = curr;
+
+        j = 0;
+
+        int newList[k];
+        int swappedList[k];
+        for(int j = 0; j < k; j++) {
+            newList[j] = INT_MAX;
+            swappedList[j] = INT_MAX;
+        }
+
+        // A new permutation 2-factor will have a first spoke at 0
+        // and 'spokes+1' degree 3 vertices followed by 'k - 1 - spokes' degree
+        // 2 vertices. (Because degree 2 vertices remain in a same cycle.)
+        do {
+            int otherEnd = next(intersection(g->bitsetList[curr], cycle2),
+             -1);
+            if(otherEnd == -1) {
+                break;
+            }
+            newList[j] = labC2[otherEnd]; 
+            swappedList[labC2[otherEnd]] = j;
+
+            // Could do less work here. Does not seem bottleneck.
+            if(j > 0) {
+                updateDistanceLists(newList, swappedList, &newL, j, newList[j], k);
+                if(pruneLists(counters, newList, L->distList, &newL, j, k)) {
+                    return true;
+                }
+            }
+
+            int next = next(difference(intersection(g->bitsetList[curr],
+             cycle1), singleton(prev)), -1);
+            prev = curr;
+            curr = next;
+            j++;
+        } while(curr != start);
+
+    } 
+
+    return false;
+}
+
+bool listIsCanonical(nautygraph *g, struct options *options,
+ struct counters *counters, int list[], struct distanceLists *L, int spokes,
+ int k) {
+
+    if(pruneLists(counters, list, L->distList, L, spokes, k)) return false;
+
+    if(!options->strongMethodFlag) return true;
+
+    // Only update permutation 2-factors if performing strong orderly generation
+    // method.
+    addNewCyclePairsOrderlyGeneration(g, list, counters, spokes,
+     list[spokes] + g->nv/2);
+
+    if(pruneOtherPerm2Factors(g, counters, list, L, spokes, k)) return false;
+
+    return true;
+}
+
+
+// If all pieces of the cycles in the 2-factor are even, return true;
+bool isEven2Factor(int list[], int inverseList[], bitset chosenVerticesInC1,
+ bitset chosenVerticesInC2, int pairsC1[], int pairsC2[], int s, int e, int k,
+ int startC2[]) {
+
+    bitset verticesC1ToCheck = chosenVerticesInC1;
+    
+    while(!isEmpty(verticesC1ToCheck)) {
+        int start = next(verticesC1ToCheck, -1);
+        int curr = start;
+        int lenCycle = 0;
+        do {
+            int len = 0;
+            int next = next(chosenVerticesInC1, curr);
+            if(next != -1) {
+                len = next - curr + 1;
+            }
+            else { // Wraps around the cycle
+                next = next(chosenVerticesInC1, -1);
+                len = k - curr + next + 1;
+            }
+
+            if(next == pairsC1[curr]) {
+                next = prev(chosenVerticesInC1, curr);
+                if(next != -1) {
+                    len = curr - next + 1;
+                }
+                else {
+                    next = prev(chosenVerticesInC1, BITSETSIZE);
+                    len = k - next + curr + 1;
+                }
+            }
+            lenCycle += len;
+            removeElement(verticesC1ToCheck, curr);
+            removeElement(verticesC1ToCheck, next);
+
+            curr = list[next];
+            next = next(chosenVerticesInC2, curr);
+            if(next != -1) {
+                len = next - curr + 1;
+            }
+            else { // Wraps around the cycle
+                next = next(chosenVerticesInC2, -1);
+                len = k - curr + next + 1;
+            }
+
+            if(next == pairsC2[curr]) {
+                next = prev(chosenVerticesInC2, curr);
+                if(next != -1) {
+                    len = curr - next + 1;
+                }
+                else {
+                    next = prev(chosenVerticesInC2, BITSETSIZE);
+                    len = k - next + curr + 1;
+                }
+            }
+            lenCycle += len;
+            curr = inverseList[next];
+        } while(curr != start);
+        if((lenCycle % 2) != 0) return false;
+    }
+
+    return true;
+}
+
+// Build 2-factor of the graph two crossings at a time. Each time we add an edge
+// to a neighbour of e and an edge to a neighbour of that neighbour. If the
+// result is adjacent to start, we have a 2-factor.
+bool evenTwoFactorRecursion(nautygraph *g, struct counters *counters,
+ struct options *options, int list[], int inverseList[],
+ bitset chosenVerticesInC1, bitset chosenVerticesInC2, int pairsC1[],
+ int pairsC2[], int s, int e, int k, int startC2[]) {
+
+    if((size(chosenVerticesInC1) % 2 == 0) && (s == (e+1)%k || e == (s+1)%k)) {
+        pairsC1[s] = e;
+        pairsC1[e] = s;
+        if(isEven2Factor(list, inverseList, chosenVerticesInC1,
+         chosenVerticesInC2, pairsC1, pairsC2, s, e, k, startC2)) {
+            counters->prunedEvenTwoFactor++;
+            counters->prunedEvenTwoFactorWithCrossings[
+             size(chosenVerticesInC1)]++;
+            return true;
+        }
+
+        // Non trivial overhead for typically few extra pruning, but it is
+        // exhaustive meaning we would only generate snarks if this is
+        // present.
+        if(options->snarkFlag) {
+
+            // Continue with new start and end. This might check multiple paths
+            // twice. To avoid a bit of symmetry, we only take inc of list[eNew]
+            // at the start.
+            bitset unchosen = setComplement(chosenVerticesInC1, k);
+            forEach(eNew, unchosen) {
+                if(list[eNew] == INT_MAX) continue;
+                add(chosenVerticesInC1, eNew);
+                add(chosenVerticesInC2, list[eNew]);
+                int inc = (list[eNew]+1)%k;
+                if(inverseList[inc] != INT_MAX &&
+                 !contains(chosenVerticesInC2, inc)) {
+                    int sNew = inverseList[inc];
+                    add(chosenVerticesInC1, sNew);
+                    add(chosenVerticesInC2, list[sNew]);
+                    pairsC2[list[sNew]] =  list[eNew];
+                    pairsC2[list[eNew]] =  list[sNew];
+
+                    if(evenTwoFactorRecursion(g, counters, options, list,
+                     inverseList, chosenVerticesInC1, chosenVerticesInC2,
+                     pairsC1, pairsC2, sNew, eNew, k, startC2)) return true;
+
+                    removeElement(chosenVerticesInC1, sNew);
+                    removeElement(chosenVerticesInC2, list[sNew]);
+                }
+                removeElement(chosenVerticesInC1, eNew);
+                removeElement(chosenVerticesInC2, list[eNew]);
+            }
+        }
+
+        // If both neighbours of s are taken, we cannot finish the 2-factor
+        // anymore
+        if(contains(chosenVerticesInC1, (k+s-1)%k) &&
+         contains(chosenVerticesInC1, (s+1)%k)) {
+            return false;
+        }
+    }
+
+    // Add a new pair of crossings such that one of the crossings edge has an
+    // endpoint adjacent to and endpoint of e, the two crossing edges each have
+    // an endpoint adjacent to each other and make the fourth endpoint the new
+    // e in all possible ways.
+    int eInc = (e+1)%k;
+    if(!contains(chosenVerticesInC1, eInc) && list[eInc] != INT_MAX) {
+        int fc = (list[eInc]+1)%k;
+        if(size(g->bitsetList[fc + k]) != 2) {
+            if(!contains(chosenVerticesInC2, fc)) {
+                int eNew = inverseList[fc];
+                pairsC1[eInc] = e;
+                pairsC1[e] = eInc;
+                pairsC2[fc] = list[eInc];
+                pairsC2[list[eInc]] = fc;
+                if(evenTwoFactorRecursion(g, counters, options, list,
+                 inverseList, union(chosenVerticesInC1,
+                  union(singleton(eNew), singleton(eInc))),
+                 union(chosenVerticesInC2,
+                  union(singleton(fc), singleton(list[eInc]))), pairsC1,
+                 pairsC2, s, eNew, k, startC2)) {
+                    return true;
+                }
+            }
+        }
+        fc = (k+list[eInc]-1)%k;
+        if(size(g->bitsetList[fc + k]) != 2) {
+            if(!contains(chosenVerticesInC2, fc)) {
+                int eNew = inverseList[fc];
+                pairsC1[eInc] = e;
+                pairsC1[e] = eInc;
+                pairsC2[fc] = list[eInc];
+                pairsC2[list[eInc]] = fc;
+                if(evenTwoFactorRecursion(g, counters, options, list,
+                 inverseList, union(chosenVerticesInC1,
+                  union(singleton(eNew), singleton(eInc))),
+                 union(chosenVerticesInC2,
+                  union(singleton(fc), singleton(list[eInc]))), pairsC1,
+                 pairsC2, s, eNew, k, startC2)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    int eDec = (k+e-1)%k;
+    if(!contains(chosenVerticesInC1, eDec) && list[eDec] != INT_MAX) {
+        int fc = (list[eDec]+1)%k;
+        if(size(g->bitsetList[fc + k]) != 2) {
+            if(!contains(chosenVerticesInC2, fc)) {
+                int eNew = inverseList[fc];
+                pairsC1[eDec] = e;
+                pairsC1[e] = eDec;
+                pairsC2[fc] = list[eDec];
+                pairsC2[list[eDec]] = fc;
+                if(evenTwoFactorRecursion(g, counters, options, list,
+                 inverseList, union(chosenVerticesInC1,
+                  union(singleton(eNew), singleton(eDec))),
+                 union(chosenVerticesInC2,
+                  union(singleton(fc), singleton(list[eDec]))), pairsC1,
+                 pairsC2, s, eNew, k, startC2)) {
+                    return true;
+                }
+            }
+        }
+        fc = (k+list[eDec]-1)%k;
+        if(size(g->bitsetList[fc + k]) != 2) {
+            if(!contains(chosenVerticesInC2, fc)) {
+                int eNew = inverseList[fc];
+                pairsC1[eDec] = e;
+                pairsC1[e] = eDec;
+                pairsC2[fc] = list[eDec];
+                pairsC2[list[eDec]] = fc;
+                if(evenTwoFactorRecursion(g, counters, options, list,
+                 inverseList, union(chosenVerticesInC1,
+                  union(singleton(eNew), singleton(eDec))),
+                 union(chosenVerticesInC2,
+                  union(singleton(fc), singleton(list[eDec]))), pairsC1,
+                 pairsC2, s, eNew, k, startC2)) {
+                    return true;
+                } 
+           }
+        }
+    }
+
+    return false;
+}
+
+// Check if the current subgraph has an even 2-factor. If only -s but not -S,
+// then this does NOT detect all even 2-factors (but is a lot faster). 
+bool hasEvenTwoFactor(nautygraph *g, struct counters * counters,
+ struct options *options, int list[], int inverseList[], int spokes, int k) {
+
+    // Start by adding the last added edge to the 2-factor. Chosen vertices are
+    // the endpoints of the crossings of this 2-factor. Pairs are the edges on
+    // the cycles of the perm 2-factor that do not belong to the 2-factor. I.e.
+    // if pairsC1[x] = y, then x and y are adjacent, lie on C1, xy does not
+    // belong to the 2-factor and it will cross to C2 at both x and at y.
+    int e = spokes;
+    bitset chosenVerticesInC1 = singleton(e);
+    bitset chosenVerticesInC2 = singleton(list[e]);
+    int pairsC1[BITSETSIZE] = {0};
+    int pairsC2[BITSETSIZE] = {0};
+
+
+    // Complete the first crossing pair with an edge that has an endpoint
+    // adjacent to list[e]. Its other endpoint will be the "start" of our even
+    // 2-factor.
+    if(size(g->bitsetList[(list[spokes]+1)%k + k]) != 2) {
+        int s = inverseList[(list[spokes]+1)%k];
+        add(chosenVerticesInC1, s);
+        add(chosenVerticesInC2, list[s]);
+        pairsC2[list[s]] =  list[e];
+        pairsC2[list[e]] =  list[s];
+
+        if(evenTwoFactorRecursion(g, counters, options, list, inverseList,
+         chosenVerticesInC1, chosenVerticesInC2, pairsC1, pairsC2, s, e, k,
+         (int[]) {list[e], list[s]})) return true;
+
+        removeElement(chosenVerticesInC1, s);
+        removeElement(chosenVerticesInC2, list[s]);
+    }
+    if(size(g->bitsetList[(k+list[spokes]-1) % k + k]) != 2) {
+        int s = inverseList[(k+list[spokes]-1)%k];
+        add(chosenVerticesInC1, s);
+        add(chosenVerticesInC2, list[s]);
+        pairsC2[list[s]] =  list[e];
+        pairsC2[list[e]] =  list[s];
+
+        if(evenTwoFactorRecursion(g, counters, options, list, inverseList,
+         chosenVerticesInC1, chosenVerticesInC2, pairsC1, pairsC2, s, e, k,
+         (int[]) {list[e], list[s]})) return true;
+
+        removeElement(chosenVerticesInC1, s);
+        removeElement(chosenVerticesInC2, list[s]);
+    }
+    return false;
+}
+
+
 
 // Another method which builds permutations and only accepts the
 // lexicographically smallest after performing several operations. This method
 // does not eliminate all isomorphisms.
 void recursionLexSmallestPerm(nautygraph *g, int list[], int inverseList[],
- bitset remainingOptions, bitset forbiddenNextSteps[], struct options *options,
-  struct counters *counters, int spokes) {
+ struct distanceLists *L, bitset remainingOptions, bitset forbiddenNextSteps[],
+ struct options *options, struct counters *counters, int spokes) {
 
     // Used for res/mod split.
     if(spokes == options->splitLevel) {
@@ -2864,157 +3867,124 @@ void recursionLexSmallestPerm(nautygraph *g, int list[], int inverseList[],
         return;
     }
 
-    // if(!isEmpty(intersection(forbiddenNextSteps[list[spokes - 1]], remainingOptions))) {
-    // //     printGraph(g);
-    // //     printBitset(badOpts);
-    //     counter++;
-    // }
+    // Options which are still available to add to the list and which would not
+    // give a hamiltonian cycle which crosses the cycle of the perm 2-factor 4
+    // or 6 times.
+    bitset goodOpts = difference(remainingOptions,
+     forbiddenNextSteps[list[spokes - 1]]);
 
-    bitset goodOpts = difference(remainingOptions, forbiddenNextSteps[list[spokes - 1]]);
-
+    // Make copy of forbidden pairs of edges, which we will use when
+    // backtracking.
     bitset forbiddenNextStepsCopy[BITSETSIZE];
-    memcpy(forbiddenNextStepsCopy, forbiddenNextSteps, sizeof(bitset) * BITSETSIZE);
+    memcpy(forbiddenNextStepsCopy, forbiddenNextSteps,
+     sizeof(bitset) * BITSETSIZE);
+
+    // Seems to not really have an impact if we do not use this.
+    int nCyclePairsCopy = g->nCyclePairs;
+    bitset inducedCyclePairsCopy[g->nCyclePairs];
+    memcpy(inducedCyclePairsCopy, g->inducedCyclePairs,
+     g->nCyclePairs*sizeof(bitset));
 
     forEach(el, goodOpts) {
 
         if(options->minimalGirth > 4) {
-            if(containsForbiddenCycleWithEdge(g, options->minimalGirth, spokes, el+g->nv/2)) continue;
+            if(containsForbiddenCycleWithEdge(g, options->minimalGirth, spokes,
+             el+g->nv/2)) continue;
         }
 
         list[spokes] = el;
         inverseList[el] = spokes;
-        bool isSmallest = true;
-
-        // fprintf(stderr, "List: ");
-        // for(int i = 0; i < spokes+1; i++) {
-        //     fprintf(stderr, "%d ", list[i]);
-        // }
-        // fprintf(stderr, "\n");
-
-        if(spokes == g->nv/2 -  1 && !distListIsLexMinimalRot(list, g->nv)) {
-            // fprintf(stderr, "Not lex minimal rotation\n");
-            continue;
-        }
-
-        // Check if mirroring inner cycle is lexicographically smaller:
-        if(!mirroringIsGreater(list, list, spokes, g->nv)) continue;
-
-        // Check if reversing permutation is smaller:
-        if(!reversingIsGreater(list, list, spokes, g->nv)) continue;
-
-        // Check if both cycles are consecutive
-        bitset opts = difference(remainingOptions, singleton(el));
-        int firstOption = next(opts, -1);
-        int secondNonOption = next(setComplement(opts, g->nv/2), 0);
-        if(firstOption <= spokes && secondNonOption < g->nv/2-spokes) {
-
-            addSpoke(g, spokes, el+g->nv/2);
-
-            if(options->nonHamFlag) {
-                add(forbiddenNextSteps[el - 1], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
-                add(forbiddenNextSteps[el - 1], (list[spokes - 1] + 1) % (g->nv/2));
-                add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
-                add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (list[spokes - 1] + 1) % (g->nv/2));
-                add(forbiddenNextSteps[(g->nv/2 + list[spokes - 1] - 1)%(g->nv/2)], (el+1)%(g->nv/2));
-                add(forbiddenNextSteps[(list[spokes - 1] + 1)%(g->nv/2)], (g->nv/2+el-1)%(g->nv/2));
-                addForbiddenSteps(list, inverseList, spokes, remainingOptions, forbiddenNextSteps, g->nv);
-
-                counters->checkHam++;
-                counters->checkHamSpokes[spokes+1]++;
-                if(
-                 addingEdgeGivesHamiltonianCycleCubHam(g, counters, spokes, el+g->nv/2)) {
-
-                    counters->pruneHamSpokes[spokes+1]++;
-                    counters->pruneHam++;
-                    removeSpoke(g, spokes, el+g->nv/2);
-                    memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
-
-
-                    continue;
-                }
-            }
-
-            recursionLexSmallestPerm(g, list, inverseList,
-             difference(remainingOptions, singleton(el)), forbiddenNextSteps,
-              options, counters, spokes+1);
-
-            removeSpoke(g, spokes, el+g->nv/2);
-            memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
-
-            continue;
-        }
-
-        // If both are consecutive we can swap.
-
-        // Swapping cycles is smaller:
-        int swappedList[spokes+1];
-        if(firstOption > spokes) {
-            for(int i = 0; i <= spokes; i++) {
-                swappedList[list[i]] = i;
-            }
-        }
-        else {
-            for(int i = 0; i <= spokes; i++) {
-                swappedList[(g->nv/2 - list[i]) % (g->nv/2)] = i;
-            }
-        }
-        for(int i = 0; i <= spokes; i++) {
-            if(list[i] > swappedList[i]) {
-                isSmallest = false;
-                break;
-            }
-            if(list[i] < swappedList[i]) break;
-        }
-        if(!isSmallest) continue;
-
-
-        // Check if mirroring inner cycle after swap is lexicographically
-        // smaller:
-        if(!mirroringIsGreater(list, swappedList, spokes, g->nv)) continue;
-
-        // Check if reversing permutation after swap is smaller:
-        if(!reversingIsGreater(list, swappedList, spokes, g->nv)) continue;
-
-        // Is this the best place for this check?
-        if(spokes == g->nv/2 - 1 && contains(forbiddenNextSteps[el], list[0])) {
-            continue;
-        }
 
         addSpoke(g, spokes, el+g->nv/2);
 
-       
-        if(options->nonHamFlag) {
+        if(options->snarkHeuristicFlag &&
+         hasEvenTwoFactor(g, counters, options, list, inverseList, spokes,
+          g->nv/2)) {
+            removeSpoke(g, spokes, el+g->nv/2);
+            list[spokes] = INT_MAX;
+            inverseList[el] = INT_MAX;
+            continue;
+        }
 
-            // Seems to have no effect, but do not see why it should not for very
-            // large n.
-            add(forbiddenNextSteps[el - 1], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
-            add(forbiddenNextSteps[el - 1], (list[spokes - 1] + 1) % (g->nv/2));
-            add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (g->nv/2 + list[spokes - 1] - 1)%(g->nv/2));
-            add(forbiddenNextSteps[(el + 1)%(g->nv/2)], (list[spokes - 1] + 1) % (g->nv/2));
-            add(forbiddenNextSteps[(g->nv/2 + list[spokes - 1] - 1)%(g->nv/2)], (el+1)%(g->nv/2));
-            add(forbiddenNextSteps[(list[spokes - 1] + 1)%(g->nv/2)], (g->nv/2+el-1)%(g->nv/2));
-            addForbiddenSteps(list, inverseList, spokes, remainingOptions, forbiddenNextSteps, g->nv);
+        // To reset the substring matches bitsets later
+        bitset copies[] = {L->distMatch, L->revMatch, L->swapMatch,
+         L->swapRevMatch, L->swapMirMatch, L->swapMirRevMatch};
+
+        // Dynamically update the distance lists
+        updateDistanceLists(list, inverseList, L, spokes, el, g->nv/2);
+
+
+        if(!listIsCanonical(g, options, counters, list, L, spokes, g->nv/2)) {
+            removeSpoke(g, spokes, el+g->nv/2);
+            list[spokes] = INT_MAX;
+            inverseList[el] = INT_MAX;
+            revertDistanceLists(list, inverseList, L, copies, spokes, el,
+             g->nv/2);
+
+            memcpy(g->inducedCyclePairs, inducedCyclePairsCopy,\
+             nCyclePairsCopy*sizeof(bitset));
+            g->nCyclePairs = nCyclePairsCopy;
+            continue;
+        }
+       
+        if(options->nonHamFlag || options->snarkHeuristicFlag) {
+            if(spokes == g->nv/2 - 1 &&
+             contains(forbiddenNextSteps[el], list[0])) {
+                removeSpoke(g, spokes, el+g->nv/2);
+                list[spokes] = INT_MAX;
+                inverseList[el] = INT_MAX;
+                revertDistanceLists(list, inverseList, L, copies, spokes, el,
+                 g->nv/2);
+                memcpy(g->inducedCyclePairs, inducedCyclePairsCopy,\
+                 nCyclePairsCopy*sizeof(bitset));
+                g->nCyclePairs = nCyclePairsCopy;
+                continue;
+            }
+
+            // Forbid pairs which if added will give a hamiltonian cycle that
+            // crosses the perm 2-factor cycles 4 or 6 times.
+            addForbiddenSteps(list, inverseList, spokes, remainingOptions,
+             forbiddenNextSteps, g->nv/2);
+        }
+
+        if(options->nonHamFlag) { 
             counters->checkHam++;
             counters->checkHamSpokes[spokes+1]++;
-            if(
-             addingEdgeGivesHamiltonianCycleCubHam(g, counters, spokes, el+g->nv/2)) {
+            if(addingEdgeGivesHamiltonianCycleCubHam(g, counters, spokes,
+             el+g->nv/2)) {
 
                 counters->pruneHamSpokes[spokes+1]++;
                 counters->pruneHam++;
                 removeSpoke(g, spokes, el+g->nv/2);
-                memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
+                memcpy(forbiddenNextSteps, forbiddenNextStepsCopy,
+                 sizeof(bitset) * BITSETSIZE);
 
+                list[spokes] = INT_MAX;
+                inverseList[el] = INT_MAX;
+                revertDistanceLists(list, inverseList, L, copies, spokes, el,
+                 g->nv/2);
+                memcpy(g->inducedCyclePairs, inducedCyclePairsCopy,\
+                 nCyclePairsCopy*sizeof(bitset));
+                g->nCyclePairs = nCyclePairsCopy;
                 continue;
             }
         }
 
         // Seems to be lexicographically smallest, so recurse.
-        recursionLexSmallestPerm(g, list, inverseList,
+        recursionLexSmallestPerm(g, list, inverseList, L,
          difference(remainingOptions, singleton(el)), forbiddenNextSteps,
           options, counters, spokes+1);
 
+        // RESET
+        list[spokes] = INT_MAX;
+        inverseList[el] = INT_MAX;
+        revertDistanceLists(list, inverseList, L, copies, spokes, el, g->nv/2);
         removeSpoke(g, spokes, el+g->nv/2);
-        memcpy(forbiddenNextSteps, forbiddenNextStepsCopy, sizeof(bitset) * BITSETSIZE);
+        memcpy(forbiddenNextSteps, forbiddenNextStepsCopy,
+         sizeof(bitset) * BITSETSIZE);
+        memcpy(g->inducedCyclePairs, inducedCyclePairsCopy,\
+         nCyclePairsCopy*sizeof(bitset));
+        g->nCyclePairs = nCyclePairsCopy;
     }
 }
 
@@ -3103,6 +4073,7 @@ void initializeNauty(nautygraph *g, statsblk *stats, optionblk *options,
     g->options->userautomproc = saveGenerators;
 }
 
+
 void generatePermutationGraphs(struct options *options,
  struct counters *counters, int n) {
 
@@ -3142,11 +4113,17 @@ void generatePermutationGraphs(struct options *options,
         int inverseList[n/2];
         list[0] = 0;
         inverseList[0] = 0;
+        for(int i = 1; i < n/2; i++) {
+            list[i] = INT_MAX;
+            inverseList[i] = INT_MAX;
+        }
+        struct distanceLists L = {0};
+        initDistanceLists(&L);
 
         bitset forbiddenNextSteps[BITSETSIZE] = {0};
         bitset remainingOptions = setComplement(singleton(0), n/2);
-        recursionLexSmallestPerm(&g, list, inverseList, remainingOptions, forbiddenNextSteps,
-         options, counters, 1);
+        recursionLexSmallestPerm(&g, list, inverseList, &L, remainingOptions,
+         forbiddenNextSteps, options, counters, 1);
     }
 
     freeNautyGraph(&g);
@@ -3208,115 +4185,117 @@ void printStatistics(struct options * options, struct counters * counters,
         }
     }
 
-    fprintf(stderr, "Total nauty calls: %llu\n", counters->totalNautyCalls);
-    fprintf(stderr, 
-     "Times added spoke: %llu, Times spoke was canonical: %llu (%.2f%%)\n",
-     counters->addedSpoke, counters->wasCanonical, 
-     100.0 * counters->wasCanonical / counters->addedSpoke);
-
-    fprintf(stderr, 
-     "Edge determined canonical by heuristics (ie 1 left): "
-     "%llu (%.2f%% of canonical edges)\n", 
-     counters->canonDeterminedByHeuristicTotal, 
-     100.0*counters->canonDeterminedByHeuristicTotal / counters->wasCanonical);
-    for(int i = 1; i < n/2+1; i++) {
+    if(!options->permutationMethodFlag) {
+        fprintf(stderr, "Total nauty calls: %llu\n", counters->totalNautyCalls);
         fprintf(stderr, 
-         "Spokes: %2d, \t Added spoke: %7llu, \tCalled nauty: %7llu, "
-         "\tEdge was canonical: %7llu (%.2f%% of nauty) (%.2f%% of addedspoke)"
-         "\t Edge det by heur: %7llu (%.2f%% of canon edges)\n",
-         i, counters->addedKthSpoke[i], counters->calledNauty[i],
-         counters->canonical[i], 
-         100.0 * counters->canonical[i] / counters->calledNauty[i],
-         100.0 * counters->canonical[i] / counters->addedKthSpoke[i], 
-         counters->canonDeterminedByHeuristic[i], 
-         100.0*counters->canonDeterminedByHeuristic[i]/counters->canonical[i]);
-    }
+         "Times added spoke: %llu, Times spoke was canonical: %llu (%.2f%%)\n",
+         counters->addedSpoke, counters->wasCanonical, 
+         100.0 * counters->wasCanonical / counters->addedSpoke);
 
-    fprintf(stderr, "Return because of invariant:\n\t");
-    int totalReturnAtInv = 0;
-    for(int i = 0; i < NUMBEROFINVARIANTS; i++) {
-        totalReturnAtInv += counters->returnAtInvariant[i];
-    }
-    for(int i = 0; i < NUMBEROFINVARIANTS; i++) {
-        fprintf(stderr, "%d: %llu (%.2f%%) ", i, counters->returnAtInvariant[i],
-         100.0 * counters->returnAtInvariant[i] / totalReturnAtInv);
-    }
-    fprintf(stderr, "\n");
-
-    fprintf(stderr, 
-     "\nReturn because of invariant for each number of spokes:\n");
-    for(int i = 1; i < n/2+1; i++) {
-        fprintf(stderr, "Spokes: %2d     ", i);
-        totalReturnAtInv = 0;
-        for(int j = 0; j < NUMBEROFINVARIANTS; j++) {
-            totalReturnAtInv += counters->returnAtInvariantKthSpoke[i][j];
+        fprintf(stderr, 
+         "Edge determined canonical by heuristics (ie 1 left): "
+         "%llu (%.2f%% of canonical edges)\n", 
+         counters->canonDeterminedByHeuristicTotal, 
+         100.0*counters->canonDeterminedByHeuristicTotal / counters->wasCanonical);
+        for(int i = 1; i < n/2+1; i++) {
+            fprintf(stderr, 
+             "Spokes: %2d, \t Added spoke: %7llu, \tCalled nauty: %7llu, "
+             "\tEdge was canonical: %7llu (%.2f%% of nauty) (%.2f%% of addedspoke)"
+             "\t Edge det by heur: %7llu (%.2f%% of canon edges)\n",
+             i, counters->addedKthSpoke[i], counters->calledNauty[i],
+             counters->canonical[i], 
+             100.0 * counters->canonical[i] / counters->calledNauty[i],
+             100.0 * counters->canonical[i] / counters->addedKthSpoke[i], 
+             counters->canonDeterminedByHeuristic[i], 
+             100.0*counters->canonDeterminedByHeuristic[i]/counters->canonical[i]);
         }
-        for(int j = 0; j < NUMBEROFINVARIANTS; j++) {
-            fprintf(stderr, "Inv %d: %7llu (%5.2f%%)    ", j, 
-             counters->returnAtInvariantKthSpoke[i][j], 
-             100.0*counters->returnAtInvariantKthSpoke[i][j]/totalReturnAtInv);
+
+        fprintf(stderr, "Return because of invariant:\n\t");
+        int totalReturnAtInv = 0;
+        for(int i = 0; i < NUMBEROFINVARIANTS; i++) {
+            totalReturnAtInv += counters->returnAtInvariant[i];
+        }
+        for(int i = 0; i < NUMBEROFINVARIANTS; i++) {
+            fprintf(stderr, "%d: %llu (%.2f%%) ", i, counters->returnAtInvariant[i],
+             100.0 * counters->returnAtInvariant[i] / totalReturnAtInv);
         }
         fprintf(stderr, "\n");
-    }
 
-    fprintf(stderr, 
-     "Times need to check all reducible edges: %llu (%.2f%%) "
-     "Times checking subset sufficient: %llu (%.2f%%)"
-     "\t Subset was all reducible: %7llu "
-     "(%.2f%% of times subset not sufficient)\n",
-     counters->needToCheckAllEdgesTotal, 
-     100.0 * counters->needToCheckAllEdgesTotal / 
-     (counters->needToCheckAllEdgesTotal + counters->canonHeurSufficientTotal),
-     counters->canonHeurSufficientTotal, 
-     100.0 * counters->canonHeurSufficientTotal / 
-     (counters->needToCheckAllEdgesTotal + counters->canonHeurSufficientTotal),
-     counters->subsetWasAllTotal, 
-     100.0 * counters->subsetWasAllTotal / 
-     (counters->canonHeurNotSufficientTotal));
+        fprintf(stderr, 
+         "\nReturn because of invariant for each number of spokes:\n");
+        for(int i = 1; i < n/2+1; i++) {
+            fprintf(stderr, "Spokes: %2d     ", i);
+            totalReturnAtInv = 0;
+            for(int j = 0; j < NUMBEROFINVARIANTS; j++) {
+                totalReturnAtInv += counters->returnAtInvariantKthSpoke[i][j];
+            }
+            for(int j = 0; j < NUMBEROFINVARIANTS; j++) {
+                fprintf(stderr, "Inv %d: %7llu (%5.2f%%)    ", j, 
+                 counters->returnAtInvariantKthSpoke[i][j], 
+                 100.0*counters->returnAtInvariantKthSpoke[i][j]/totalReturnAtInv);
+            }
+            fprintf(stderr, "\n");
+        }
 
-    for(int i = 1; i < n/2+1; i++) {
-        fprintf(stderr, "Spokes: %2d, \t Times check all: %7llu (%.2f%%) \t "
-         "Times subset sufficient: %7llu (%.2f%%)"
+        fprintf(stderr, 
+         "Times need to check all reducible edges: %llu (%.2f%%) "
+         "Times checking subset sufficient: %llu (%.2f%%)"
          "\t Subset was all reducible: %7llu "
          "(%.2f%% of times subset not sufficient)\n",
-         i, counters->needToCheckAllEdges[i], 
-         100.0 * counters->needToCheckAllEdges[i] / 
-         (counters->needToCheckAllEdges[i] + counters->canonHeurSufficient[i]),
-         counters->canonHeurSufficient[i],
-         100.0 * counters->canonHeurSufficient[i] / 
-         (counters->needToCheckAllEdges[i] + counters->canonHeurSufficient[i]),
-         counters->subsetWasAll[i], 
-         100.0 * counters->subsetWasAll[i] / 
-         counters->canonHeurNotSufficient[i]);
-    }
+         counters->needToCheckAllEdgesTotal, 
+         100.0 * counters->needToCheckAllEdgesTotal / 
+         (counters->needToCheckAllEdgesTotal + counters->canonHeurSufficientTotal),
+         counters->canonHeurSufficientTotal, 
+         100.0 * counters->canonHeurSufficientTotal / 
+         (counters->needToCheckAllEdgesTotal + counters->canonHeurSufficientTotal),
+         counters->subsetWasAllTotal, 
+         100.0 * counters->subsetWasAllTotal / 
+         (counters->canonHeurNotSufficientTotal));
 
-    fprintf(stderr, 
-     "Called nauty: %llu,  "
-     "Called nauty edge canonical: %llu (%.2f%% of nauty calls)"
-     "Called nauty edge not canonical: %7llu (%.2f%% of nauty calls), "
-     "Called nauty only for generators: %7llu (%.2f%% of nauty calls)\n",
-     counters->totalNautyCalls, 
-     counters->calledNautyEdgeCanonicalTotal, 
-     100.0*counters->calledNautyEdgeCanonicalTotal / counters->totalNautyCalls,
-     counters->calledNautyEdgeNotCanonicalTotal, 
-     100.0*counters->calledNautyEdgeNotCanonicalTotal/counters->totalNautyCalls,
-     counters->calledNautyForGeneratorsTotal, 
-     100.0*counters->calledNautyForGeneratorsTotal / counters->totalNautyCalls);
+        for(int i = 1; i < n/2+1; i++) {
+            fprintf(stderr, "Spokes: %2d, \t Times check all: %7llu (%.2f%%) \t "
+             "Times subset sufficient: %7llu (%.2f%%)"
+             "\t Subset was all reducible: %7llu "
+             "(%.2f%% of times subset not sufficient)\n",
+             i, counters->needToCheckAllEdges[i], 
+             100.0 * counters->needToCheckAllEdges[i] / 
+             (counters->needToCheckAllEdges[i] + counters->canonHeurSufficient[i]),
+             counters->canonHeurSufficient[i],
+             100.0 * counters->canonHeurSufficient[i] / 
+             (counters->needToCheckAllEdges[i] + counters->canonHeurSufficient[i]),
+             counters->subsetWasAll[i], 
+             100.0 * counters->subsetWasAll[i] / 
+             counters->canonHeurNotSufficient[i]);
+        }
 
-    for(int i = 1; i < n/2+1; i++) {
         fprintf(stderr, 
-         "Spokes: %2d, \t Called nauty: %7llu \t "
-         "Edge canon: %7llu (%.2f%% of nauty calls)"
-         "\t Edge not canon: %7llu (%.2f%% of nauty calls) "
-         "\t For generators: %7llu (%.2f%% of nauty calls)\n",
-         i, counters->calledNauty[i], counters->calledNautyEdgeCanonical[i], 
-         100.0*counters->calledNautyEdgeCanonical[i] / counters->calledNauty[i],
-         counters->calledNautyEdgeNotCanonical[i], 
-         100.0 * counters->calledNautyEdgeNotCanonical[i] / 
-          counters->calledNauty[i],
-         counters->calledNautyForGenerators[i], 
-         100.0 * counters->calledNautyForGenerators[i] /
-          counters->calledNauty[i]);
+         "Called nauty: %llu,  "
+         "Called nauty edge canonical: %llu (%.2f%% of nauty calls)"
+         "Called nauty edge not canonical: %7llu (%.2f%% of nauty calls), "
+         "Called nauty only for generators: %7llu (%.2f%% of nauty calls)\n",
+         counters->totalNautyCalls, 
+         counters->calledNautyEdgeCanonicalTotal, 
+         100.0*counters->calledNautyEdgeCanonicalTotal / counters->totalNautyCalls,
+         counters->calledNautyEdgeNotCanonicalTotal, 
+         100.0*counters->calledNautyEdgeNotCanonicalTotal/counters->totalNautyCalls,
+         counters->calledNautyForGeneratorsTotal, 
+         100.0*counters->calledNautyForGeneratorsTotal / counters->totalNautyCalls);
+
+        for(int i = 1; i < n/2+1; i++) {
+            fprintf(stderr, 
+             "Spokes: %2d, \t Called nauty: %7llu \t "
+             "Edge canon: %7llu (%.2f%% of nauty calls)"
+             "\t Edge not canon: %7llu (%.2f%% of nauty calls) "
+             "\t For generators: %7llu (%.2f%% of nauty calls)\n",
+             i, counters->calledNauty[i], counters->calledNautyEdgeCanonical[i], 
+             100.0*counters->calledNautyEdgeCanonical[i] / counters->calledNauty[i],
+             counters->calledNautyEdgeNotCanonical[i], 
+             100.0 * counters->calledNautyEdgeNotCanonical[i] / 
+              counters->calledNauty[i],
+             counters->calledNautyForGenerators[i], 
+             100.0 * counters->calledNautyForGenerators[i] /
+              counters->calledNauty[i]);
+        }
     }
     fprintf(stderr, "Total calls to addNewCycle %llu,"
      " Calls in which we have two or more deg 2 neighbours: %7llu (%.2f%%) \n",
@@ -3331,6 +4310,22 @@ void printStatistics(struct options * options, struct counters * counters,
      100.0 * counters->didNotComputeGenerators / 
       (counters->didNotComputeGenerators + 
        counters->calledNautyForGeneratorsTotal));
+
+    if(options->permutationMethodFlag) {
+        fprintf(stderr, "Calls to long booth's algorithm: %7llu\n",
+         counters->callsToBooths);
+    }
+
+    if(options->snarkHeuristicFlag) {
+        fprintf(stderr, "Pruned even 2-factor: %7llu\n",
+         counters->prunedEvenTwoFactor);
+        for(int i = 0; i < BITSETSIZE; i++) {
+            if(counters->prunedEvenTwoFactorWithCrossings[i]) {
+                fprintf(stderr, "\t with %d crossings: %7llu\n",
+                 i, counters->prunedEvenTwoFactorWithCrossings[i]);
+            }
+        }
+    }
 }
 
 int main(int argc, char ** argv) {
@@ -3346,11 +4341,14 @@ int main(int argc, char ** argv) {
             {"girth", required_argument, NULL, 'g'},
             {"help", no_argument, NULL, 'h'},
             {"non-hamiltonian", no_argument, NULL, 'n'},
+            {"strong-orderly-generation", no_argument, NULL, 'o'},
+            {"snark-heuristic", no_argument, NULL, 's'},
+            {"snark", no_argument, NULL, 'S'},
             {"permutation-method", no_argument, NULL, 'p'},
             {"verbose", no_argument, NULL, 'v'}
         };
 
-        opt = getopt_long(argc, argv, "g:hnpv", long_options, &option_index);
+        opt = getopt_long(argc, argv, "g:hnopsSv", long_options, &option_index);
         if (opt == -1) break;
         switch(opt) {
             case 'h':
@@ -3372,10 +4370,19 @@ int main(int argc, char ** argv) {
             case 'p':
                 options.permutationMethodFlag = true;
                 break;
+            case 'o':
+                options.strongMethodFlag = true;
+                options.permutationMethodFlag = true;
+                break;
+            case 's':
+                options.snarkHeuristicFlag = true;
+                break;
+            case 'S':
+                options.snarkHeuristicFlag = true;
+                options.snarkFlag = true;
+                break;
             case 'v':
                 options.verboseFlag = true;
-                fprintf(stderr,
-                 "Outputting non-hamiltonian permutation graphs.\n");
                 break;
             case '?':
                 fprintf(stderr,"Error: Unknown option: %c\n", optopt);
@@ -3411,7 +4418,8 @@ int main(int argc, char ** argv) {
     }
 
     // Cycle of length 4 gives hamiltonian cycle.
-    if(options.nonHamFlag && options.minimalGirth < 5) {
+    if((options.nonHamFlag || options.snarkHeuristicFlag) &&
+     options.minimalGirth < 5) {
         options.minimalGirth = 5;
     }
 
@@ -3437,6 +4445,22 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "Error: -p only works for 64 or 128 bit versions.\n");
         exit(1);
     } 
+
+    if(!options.permutationMethodFlag && (options.snarkHeuristicFlag)) {
+        fprintf(stderr, "Warning: -s or -S is redundant without -p.\n");
+    }
+
+    if(options.snarkHeuristicFlag && (n % 4) == 0) {
+        fprintf(stderr,
+         "Warning: no snarks on this order, however the algorithm will ignore"
+         " the even permutation 2-factor.\n");
+
+    }
+
+    if(options.snarkHeuristicFlag && !options.snarkFlag) {
+        fprintf(stderr,
+         "Warning: might output some non-snarks. Filter results afterwards!\n");
+    }
 
     fprintf(stderr, "Class=%d/%d. Splitlevel = %d.\n",
      options.remainder, options.modulo, options.splitLevel);

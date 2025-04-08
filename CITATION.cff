@@ -5,7 +5,9 @@ authors:
   given-names: "Jan"
 - family-names: "Renders"
   given-names: "Jarne"
+- family-names: "Van Overberghe"
+  given-names: "Steven"
 title: "Cycle Permutation Graphs"
-version: 1
-date-released: 2024-04-26
+version: 2
+date-released: 2025-04-08
 url: "https://github.com/JarneRenders/Cycle-Permutation-Graphs"

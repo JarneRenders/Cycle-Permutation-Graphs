@@ -44,6 +44,19 @@ typedef struct bitset {uint64_t parts[2];} bitset;
 #define safeNextLessThan63(set, current) ((set).parts[0] ? unsafeNextLessThan63(set, current) : safeNextGreaterThanOrEq63(set, 63))
 #define next(set, current)  ((current) < 63 ? safeNextLessThan63((set), (current)) : safeNextGreaterThanOrEq63((set), (current)))
 
+
+#define prev(set, current) (current > 64 ? safePrev64(set, current) : safePrev0(set, current))
+#define safePrev64(set, current) ((set).parts[1] ?  unsafePrev64(set, current) : safePrev0(set, 64))
+#define safePrev0(set, current) ((set).parts[0] ? unsafePrev0(set, current) : -1)
+
+#define unsafePrev0(set, current) (__builtin_ctzll(set.parts[0]) + 64 - (current) >= 64 ?\
+    -1 :\
+    (current) - __builtin_clzll((set.parts[0]) << (64 - (current))) - 1)
+
+#define unsafePrev64(set, current) (__builtin_ctzll(set.parts[1]) + 64 - ((current) - 64) >= 64 ?\
+    safePrev0(set, 64) :\
+    (current) - __builtin_clzll((set.parts[1]) << (64 - ((current) - 64))) - 1)
+
 //  Checks whether node is an element of set.
 #define contains(set, node) (!isEmpty(intersection((set), singleton(node))))
 
