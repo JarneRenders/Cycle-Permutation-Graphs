@@ -1,5 +1,5 @@
 # Cycle Permutation Graphs
-This repository contains two programs which were created for the article "J. Goedgebeur, J. Renders, Generation of Cycle Permutation Graphs and Permutation Snarks, manuscript".
+This repository contains two programs which were created for the article "J. Goedgebeur, J. Renders, S. Van Overberghe, Generation of Cycle Permutation Graphs and Permutation Snarks, manuscript, arXiv: [10.48550/arXiv.2411.12606](https://doi.org/10.48550/arXiv.2411.12606)".
 
 In the folder `genPermutationGraphs` one can find the program `genPermutationGraphs`, which allows for the generation of all pairwise non-isomorphic (non-hamiltonian) cycle permutation graphs of a given order `n` (with at least a given girth).
 
