@@ -137,10 +137,17 @@ Filter cycle permutation graphs. We assume the input graphs are cubic.
 Graphs are read from stdin in graph6 format. Graphs are sent to stdout in graph6 format. If the input graph had a graph6 header, so will the output graph (if it passes through the filter).
 
 ```
-    -a, --all       compute all permutation 2-factors and output the
-                     induced cycles line per line to stdout before 
-                     outputting the graph
+    -a, --all       compute all permutation 2-factors
+    -c, --count     tabulate number of permutation 2-factors of the
+                     input graphs; with -g also tabulates number of
+                     removable cycles
+    -g, --goddyn    output graphs which have removable cycles, i.e.
+                     satisfy Goddyn's conjecture
     -h, --help      print help message
+    -o#, --output=# output graphs admitting exactly # permutation
+                     2-factors if -g is not present, or admitting 
+                     exactly # removable cycles if -g is present
+    -p, --print     send computed permutation 2-factors to stdout
     -v, --verbose   make output more verbose
     res/mod         only check the ith graph if its remainder after
                      dividing by mod is res; ignore the other graphs
@@ -149,8 +156,20 @@ Graphs are read from stdin in graph6 format. Graphs are sent to stdout in graph6
 
 Let graphs.g6 be a file containing cubic graphs in graph6 format in the `isPermutationGraph` folder.
 
-`./genPermutationGraphs < graphs.g6`
+`./isPermutationGraph < graphs.g6`
 Sends all graphs in `graphs.g6` which are cycle permutation graphs to stdout.
 
-`./genPermutationGraphs -a < graphs.g6`
+`./isPermutationGraph -ap < graphs.g6`
 Sends all graphs in `graphs.g6` which are cycle permutation graphs to stdout and for each cycle permutation graph the permutation 2-factors are sent to stdout.
+
+`./isPermutationGraph -p < graphs.g6`
+Sends all graphs in `graphs.g6` which are cycle permutation graphs to stdout and for each cycle permutation graph the first found permutation 2-factors is sent to stdout.
+
+`./isPermutationGraph -c < graphs.g6`
+Tabulate the number of permutation 2-factors in the graphs in `graphs.g6` and send cycle permutation graphs to stdout. 
+
+`./isPermutationGraph -g < graphs.g6`
+Sends all graphs in `graphs.g6` which are cycle permutation graphs and contain a removable cycle to stdout. 
+
+`./isPermutationGraph -gc < graphs.g6`
+Tabulate the number of removable cycles in the graphs in `graphs.g6` and send cycle permutation graphs to stdout. 
