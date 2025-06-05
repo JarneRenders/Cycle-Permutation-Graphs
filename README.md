@@ -1,13 +1,17 @@
 # Cycle Permutation Graphs
-This repository contains two programs which were created for the article "J. Goedgebeur, J. Renders, S. Van Overberghe, Generation of Cycle Permutation Graphs and Permutation Snarks, manuscript, arXiv: [10.48550/arXiv.2411.12606](https://doi.org/10.48550/arXiv.2411.12606)".
+This repository contains three programs which were created for the article "J. Goedgebeur, J. Renders, S. Van Overberghe, Generation of Cycle Permutation Graphs and Permutation Snarks, manuscript, arXiv: [10.48550/arXiv.2411.12606](https://doi.org/10.48550/arXiv.2411.12606)".
 
 In the folder `genPermutationGraphs` one can find the program `genPermutationGraphs`, which allows for the generation of all pairwise non-isomorphic (non-hamiltonian) cycle permutation graphs of a given order `n` (with at least a given girth).
 
 In the folder `isPermutationGraph`, one can find the program `isPermutationGraph`, which can be used to filter cycle permutation graphs.
 
-Each of these subfolders contain their own readme as well as a makefile for compiling the programs.
+In the folder `generateCDC`, one can find the program `generateCDC`, which can filter graphs based on various properties involving their cycle double covers (CDCs).
+
+Each of these subfolders contain a makefile for compiling the programs.
 
 These programs all use Brendan McKay's graph6 format to read and write graphs. See <http://users.cecs.anu.edu.au/~bdm/data/formats.txt>.
+
+In the folder `data`, two graph6 files can be found, one containing all cyclically 5-edge-connected permutation snarks of order 42 which are a counterexample to the conjectures by Zhang and Jackson mentioned in the article. The other contains the cyclically 5-edge-connected permutation snarks of order 42 which are not a counterexample to these conjectures.
 
 The latest version of the programs can be obtained from: <https://github.com/JarneRenders/Cycle-Permutation-Graphs/>.
 
