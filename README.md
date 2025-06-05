@@ -173,3 +173,78 @@ Sends all graphs in `graphs.g6` which are cycle permutation graphs and contain a
 
 `./isPermutationGraph -gc < graphs.g6`
 Tabulate the number of removable cycles in the graphs in `graphs.g6` and send cycle permutation graphs to stdout. 
+
+## generateCDC
+### Short manual
+
+This program supports graphs up to and including 128 vertices.
+
+### Installation
+
+This requires a working shell and `make`. 
+
+- Navigate to the folder `generateCDC` containing `generateCDC.c` and compile using: 
+    * `make` to create a binary for the 64 bit version
+    * `make 128bit` to create a binary for the 128 bit version 
+    * `make 128bitarray` to create a binary for an alternative 128 bit version 
+    * `make all` to create all of the above
+
+The 64-bit version supports graphs only up to 64 vertices, the 128-bit versions up to 128 vertices. For graphs containing up to 64 vertices, the 64-bit version performs significantly faster than the 128-bit versions. Use `make clean` to remove all binaries created in this way.
+
+### Usage of generateCDC
+
+All options can be found by executing `./generateCDC -h`.
+
+Usage: `./generateCDC [-a|-j] [-hpv]`
+
+Check various properties involving CDCs (cycle double covers) for cubic graphs, i.e. whether the graph contains a CDC, a given pair of cycles can be extended to a CDC, all sets of pairwise disjoint cycles can be extended to a CDC (test Jackson's conjecture if the graph is cyclically 5-edge-connected) or simply generate all CDCs.
+
+Graphs are read from stdin in graph6 format. Graphs are sent to stdout in graph6 format. If the input graph had a graph6 header, so will the output graph (if it passes through the filter).
+
+For checking whether a given pair of cycles can be extended to a CDC, these cycles must also be sent to stdin **before** the graph6 string of the graph is passed. Their vertices must be separated by a space and the cycles must be separated by newlines. For example, to check if `0,2,9,8,3` and `1,4,6,7,5` can be extended to a CDC in a given labelling of the Petersen graph, send the following to stdin.
+```
+0 2 9 8 3
+1 4 6 7 5
+IsP@OkWHG
+```
+If a pair of cycles cannot be extended to a CDC the graph will be sent to stdout.
+
+```
+    -a, --all       compute all CDCs of the graph
+    -h, --help      print help message
+    -j, --jackson   tests whether any set of pairwise disjoint cycles
+                     extends to a CDC; graphs containing a set which
+                     cannot be extended are sent to stdout; if the graph
+                     is cyclically 5-edge-connected and not the Petersen
+                     graph this tests a conjecture by Jackson
+    -p, --print     prints found CDCs to stderr
+    -v, --verbose   sends verbose output to stderr
+```
+### Examples
+
+Let graphs.g6 be a file containing cubic graphs in graph6 format in the `generateCDC` folder.
+
+`./generateCDC < graphs.g6`
+Sends all graphs in `graphs.g6` which have a CDC to stdout.
+
+`./generateCDC -p < graphs.g6`
+Sends all graphs in `graphs.g6` which have a CDC to stdout and prints the found CDC to stderr.
+
+`./generateCDC -ap < graphs.g6`
+Sends for all graphs in `graphs.g6` all CDCs to stderr.
+
+`./generateCDC -apv < graphs.g6`
+Sends for all graphs in `graphs.g6` all CDCs to stderr and adds a counter for the number of cycles and number of CDCs in the graph.
+
+`../isPermutationGraph/isPermutationGraph -ap < graphs.g6 | ./generateCDC`
+Under the assumption that isPermutationGraph is compiled correctly, checks for all graphs in `graphs.g6` if a permutation 2-factor can be extended to a CDC, if not the graph is sent to stdout.
+
+`../isPermutationGraph/isPermutationGraph -ap < graphs.g6 | ./generateCDC -v`
+Under the assumption that isPermutationGraph is compiled correctly, checks for all graphs in `graphs.g6` if a permutation 2-factor can be extended to a CDC, if not the graph is sent to stdout. Writes which permutation 2-factor is the first one not able to be extended to a CDC.
+
+`./generateCDC -j < graphs.g6`
+Check for all graphs in `graphs.g6` for all (maximal) sets of pairwise disjoint cycles whether or not they can be extended to a CDC. If there is one set which cannot the graph is sent to stdout.
+
+`./generateCDC -jv < graphs.g6`
+Check for all graphs in `graphs.g6` for all (maximal) sets of pairwise disjoint cycles whether or not they can be extended to a CDC. If there is one set which cannot the graph is sent to stdout. Sends the set of cycles which cannot be extended to stderr.
+
